@@ -1,0 +1,603 @@
+theory sesame begin
+
+
+/*
+
+==============================================================================
+summary of summaries:
+
+analyzed: Sesame_PCSAttack.spthy
+
+  can_create_user (exists-trace): analysis incomplete (1 steps)
+  can_key_exchange (exists-trace): analysis incomplete (1 steps)
+  can_receive_sym_message (exists-trace): analysis incomplete (1 steps)
+  can_receive_attacker (exists-trace): analysis incomplete (1 steps)
+  can_ratchet_attacker (exists-trace): analysis incomplete (1 steps)
+  attack_pcs (exists-trace): verified (80 steps)
+
+==============================================================================
+  3.84s user 
+  1.96s system 
+  246% cpu 
+  2.351 total
+
+
+ $ tamarin-prover Sesame_PCSAttack.spthy
+
+*/
+
+
+
+// Function signature and definition of the equational theory E
+functions: fst/1[destructor], h/1, kdf/2, pair/2, pk/1,
+           sdec/2[destructor], senc/2, sign/2, snd/1[destructor], true/0,
+           verify/3[destructor]
+equations:
+    fst(<x.1, x.2>) = x.1,
+    sdec(senc(x.1, x.2), x.2) = x.1,
+    snd(<x.1, x.2>) = x.2,
+    verify(sign(x.1, x.2), x.1, pk(x.2)) = true
+
+heuristic: o "oracle.py"
+
+restriction CompromiseOnceSending:
+  "∀ A B rk #i #j.
+    ((CompromiseSending( A, B, rk ) @ #i) ∧
+     (CompromiseSending( A, B, rk ) @ #j)) ⇒
+    (#i = #j)"
+  // safety formula
+
+restriction CompromiseOnceReceiving:
+  "∀ A B rk #i #j.
+    ((CompromiseReceiving( A, B, rk ) @ #i) ∧
+     (CompromiseReceiving( A, B, rk ) @ #j)) ⇒
+    (#i = #j)"
+  // safety formula
+
+restriction SingleAsymmetricStep:
+  "∀ B A rk new_rk #i #j.
+    ((AsymetricStepB( B, A, rk, new_rk ) @ #i) ∧
+     (AsymetricStepB( B, A, rk, new_rk ) @ #j)) ⇒
+    (#i = #j)"
+  // safety formula
+
+restriction SingleAsymmetricStepBis:
+  "∀ B A rk new_rk new_rk2 #i #j.
+    ((AsymetricStepB( B, A, rk, new_rk ) @ #i) ∧
+     (AttackerAsymetricStep( B, A, rk, new_rk2 ) @ #j)) ⇒
+    (⊥)"
+  // safety formula
+
+restriction SingleReceive:
+  "∀ B A rck #i #j.
+    ((ReceiveOnce( B, A, rck ) @ #i) ∧
+     (ReceiveOnce( B, A, rck ) @ #j)) ⇒
+    (#i = #j)"
+  // safety formula
+
+restriction SingleSkip:
+  "∀ B A rck #i #j.
+    ((SkipOnce( B, A, rck ) @ #i) ∧ (SkipOnce( B, A, rck ) @ #j)) ⇒
+    (#i = #j)"
+  // safety formula
+
+restriction SingleDevice:
+  "∀ id s1 s2 #i #j.
+    ((CreateDevice( id, s1 ) @ #i) ∧ (CreateDevice( id, s2 ) @ #j)) ⇒
+    (#i = #j)"
+  // safety formula
+
+restriction NotStartSessionWithSelf:
+  "∀ A B #i. (AssociateDevice( A, B ) @ #i) ⇒ (¬(A = B))"
+  // safety formula
+
+rule (modulo E) CreateDevice[color=#fdfcdc]:
+   [ Fr( ~sk ) ]
+  --[ CreateDevice( $id, ~sk ) ]->
+   [ !Partie( $id, ~sk ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Init[color=#fbd1a2]:
+   [ !Partie( A, skA ), !Partie( B, skB ) ]
+  --[ AssociateDevice( A, B ), AssociateDevice( B, A ) ]->
+   [ UserState( A, B, skA, pk(skB) ), UserState( B, A, skB, pk(skA) )
+   ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) InitKeyExchange[color=#fbd1a2]:
+   [
+   UserState( A, B, skA, pk(skB) ), UserState( B, A, skB, pk(skA) ),
+   Fr( ~rk ), Fr( ~tidA ), Fr( ~tidB )
+   ]
+  --[
+  KeyExchange( A, B, ~rk ), InitKeyExchange( A, B ),
+  InitKeyExchange( B, A ), StartChainRk( ~tidA, A, B, ~rk ),
+  StartChainRk( ~tidB, B, A, ~rk ),
+  ConversationStartChainRk( A, B, ~rk ),
+  ConversationStartChainRk( B, A, ~rk ),
+  StartChainRkSnd( ~tidA, A, B, ~rk ),
+  StartChainRkRcv( ~tidB, B, A, ~rk )
+  ]->
+   [
+   SendingChainKey( ~rk, ~tidA, A, B, h(~rk) ),
+   !ReceivingChainKey( ~tidB, ~rk, B, A, h(~rk) ),
+   BookKeppingRootKeys( ~tidA, A, ~rk ),
+   BookKeppingRootKeys( ~tidB, B, ~rk ),
+   BookKeppingGlobalRootKeys( ~tidA, A, ~rk ),
+   BookKeppingGlobalRootKeys( ~tidB, B, ~rk )
+   ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) SendReceiveAsymetric[color=#00b2ca]:
+   [
+   SendingChainKey( ~rk, ~tidA, A, B, ck ),
+   !ReceivingChainKey( ~tidB, ~rk, B, A, ck ),
+   BookKeppingRootKeys( ~tidA, A, ~rk ),
+   BookKeppingRootKeys( ~tidB, B, ~rk ),
+   BookKeppingGlobalRootKeys( ~tidA, A, ~rk ),
+   BookKeppingGlobalRootKeys( ~tidB, B, ~rk ), Fr( ~new_rk )
+   ]
+  --[
+  AsymetricStep( A, B, ck, ~new_rk ),
+  AsymetricStepB( B, A, ~rk, ~new_rk ), Heal( ~tidA, A, ~rk ),
+  Heal( ~tidB, B, ~rk ), ConversationHeal( A, B, ~rk ),
+  ConversationHeal( B, A, ~rk ), KeyUpdate( ~rk, ~new_rk ),
+  StartChainRk( ~tidA, A, B, ~new_rk ),
+  StartChainRk( ~tidB, B, A, ~new_rk ),
+  ConversationStartChainRk( A, B, ~new_rk ),
+  ConversationStartChainRk( B, A, ~new_rk ),
+  StartChainRkRcv( ~tidA, A, B, ~new_rk ),
+  StartChainRkSnd( ~tidB, B, A, ~new_rk )
+  ]->
+   [
+   SendingChainKey( ~new_rk, ~tidB, B, A, h(~new_rk) ),
+   !ReceivingChainKey( ~tidA, ~new_rk, A, B, h(~new_rk) ),
+   BookKeppingRootKeys( ~tidA, A, ~new_rk ),
+   BookKeppingRootKeys( ~tidB, B, ~new_rk ),
+   BookKeppingGlobalRootKeys( ~tidA, A, ~new_rk ),
+   BookKeppingGlobalRootKeys( ~tidB, B, ~new_rk )
+   ]
+
+  // loop breakers: [0,1,2,3,4,5]
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) SendReceiveAsymetric_ReceiveToSend[color=#00b2ca]:
+   [
+   In( rck ), !ReceivingChainKey( ~tidB, ~rk, B, A, rck ),
+   BookKeppingRootKeys( ~tidB, B, ~rk ),
+   BookKeppingGlobalRootKeys( ~tidB, B, ~rk ), Fr( ~new_rk )
+   ]
+  --[
+  AttackerAsymetricStep( B, A, ~rk, ~new_rk ),
+  KeyUpdate( ~rk, ~new_rk ), StartChainRk( ~tidB, B, A, ~new_rk ),
+  ConversationStartChainRk( B, A, ~new_rk ),
+  StartChainRkSnd( ~tidB, B, A, ~new_rk )
+  ]->
+   [
+   SendingChainKey( ~new_rk, ~tidB, B, A, h(~new_rk) ),
+   BookKeppingRootKeys( ~tidB, B, ~new_rk ),
+   BookKeppingGlobalRootKeys( ~tidB, B, ~new_rk ), Out( ~new_rk )
+   ]
+
+  // loop breakers: [2,3]
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) SendReceiveAsymetric_SendToReceive[color=#00b2ca]:
+   [
+   SendingChainKey( ~rk, ~tidA, A, B, sck ), In( sck ),
+   BookKeppingRootKeys( ~tidA, A, ~rk ),
+   BookKeppingGlobalRootKeys( ~tidA, A, ~rk ), Fr( ~new_rk )
+   ]
+  --[
+  AttackerAsymetricStep( A, B, ~rk, ~new_rk ),
+  StartChainRk( ~tidA, A, B, ~new_rk ),
+  ConversationStartChainRk( A, B, ~new_rk ),
+  StartChainRkRcv( ~tidA, A, B, ~new_rk ), KeyUpdate( ~rk, ~new_rk )
+  ]->
+   [
+   Out( ~new_rk ), BookKeppingRootKeys( ~tidA, A, ~new_rk ),
+   BookKeppingGlobalRootKeys( ~tidA, A, ~new_rk ),
+   !ReceivingChainKey( ~tidA, ~new_rk, A, B, h(~new_rk) )
+   ]
+
+  // loop breakers: [0,2,3]
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) SendSymetric[color=#7dcfb6]:
+   [
+   SendingChainKey( ~rk, ~tidA, A, B, sck ),
+   BookKeppingGlobalRootKeys( ~tidA, A, ~rk ), Fr( ~payload )
+   ]
+  --[
+  SendMessage( A, B, ~rk, sck, ~payload ),
+  SendPayload( A, B, ~rk, ~payload ), SendChainKey( A, B, ~rk, sck ),
+  GlobalSendChainKey( ~tidA, A, B, ~rk, sck )
+  ]->
+   [
+   Out( senc(~payload, sck) ),
+   SendingChainKey( ~rk, ~tidA, A, B, h(sck) ),
+   BookKeppingGlobalRootKeys( ~tidA, A, ~rk )
+   ]
+
+  // loop breakers: [0,1]
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) ReceiveSymetric[color=#f79256]:
+   [
+   !ReceivingChainKey( ~tidB, ~rk, B, A, rck ),
+   In( senc(payload, rck) )
+   ]
+  --[
+  ReceivedMessage( B, A, ~rk, rck, payload ),
+  ReceiveOnce( B, A, rck ), ReceiverChain( ~tidB, B, A, ~rk, rck )
+  ]->
+   [ !ReceivingChainKey( ~tidB, ~rk, B, A, h(rck) ) ]
+
+  // loop breaker: [0]
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) ReceiveSymetricSkip[color=#f79256]:
+   [
+   !ReceivingChainKey( ~tidB, ~rk, B, A, rck ),
+   In( senc(payload, rck) )
+   ]
+  --[
+  NotReceivedMessage( B, A, ~rk, rck, payload ),
+  SkipOnce( B, A, rck ), ReceiverChain( ~tidB, B, A, ~rk, rck )
+  ]->
+   [ !ReceivingChainKey( ~tidB, ~rk, B, A, h(rck) ) ]
+
+  // loop breaker: [0]
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) CompromiseSender[color=#ea3546]:
+   [
+   SendingChainKey( ~rk, ~tidA, A, B, h(sck) ),
+   BookKeppingGlobalRootKeys( ~tidA, A, ~rk )
+   ]
+  --[
+  CompromiseSending( A, B, ~rk ), CompromiseChain( A, B, h(sck) ),
+  CompromisePartie( A, B ), CompromisePartieThread( ~tidA, A, B ),
+  GlobalSendChainKey( ~tidA, A, B, ~rk, h(sck) )
+  ]->
+   [
+   SendingChainKey( ~rk, ~tidA, A, B, h(sck) ),
+   BookKeppingGlobalRootKeys( ~tidA, A, ~rk ), Out( h(sck) )
+   ]
+
+  // loop breakers: [0,1]
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) CompromiseReceiving[color=#ea3546]:
+   [ !ReceivingChainKey( ~tidB, ~other_rk, A, B, h(rck) ) ]
+  --[
+  CompromiseReceiving( A, B, ~other_rk ),
+  CompromiseChain( A, B, h(rck) ),
+  CompromisePartieThread( ~tidB, A, B ), CompromisePartie( A, B )
+  ]->
+   [ Out( h(rck) ) ]
+
+  /* has exactly the trivial AC variant */
+
+lemma can_create_user:
+  exists-trace "∃ A B #i. AssociateDevice( A, B ) @ #i"
+/*
+guarded formula characterizing all satisfying traces:
+"∃ A B #i. (AssociateDevice( A, B ) @ #i)"
+*/
+by sorry
+
+lemma can_key_exchange:
+  exists-trace "∃ A B rk #i. KeyExchange( A, B, rk ) @ #i"
+/*
+guarded formula characterizing all satisfying traces:
+"∃ A B rk #i. (KeyExchange( A, B, rk ) @ #i)"
+*/
+by sorry
+
+lemma can_receive_sym_message:
+  exists-trace
+  "∃ A B rk rck payload #i.
+    ReceivedMessage( A, B, rk, rck, payload ) @ #i"
+/*
+guarded formula characterizing all satisfying traces:
+"∃ A B rk rck payload #i.
+  (ReceivedMessage( A, B, rk, rck, payload ) @ #i)"
+*/
+by sorry
+
+lemma can_receive_attacker:
+  exists-trace
+  "∃ A B rk rck payload #i #j.
+    (ReceivedMessage( A, B, rk, rck, payload ) @ #i) ∧
+    (!KU( payload ) @ #j)"
+/*
+guarded formula characterizing all satisfying traces:
+"∃ A B rk rck payload #i #j.
+  (ReceivedMessage( A, B, rk, rck, payload ) @ #i) ∧
+  (!KU( payload ) @ #j)"
+*/
+by sorry
+
+lemma can_ratchet_attacker:
+  exists-trace
+  "∃ A B rk rkother #i.
+    AttackerAsymetricStep( A, B, rk, rkother ) @ #i"
+/*
+guarded formula characterizing all satisfying traces:
+"∃ A B rk rkother #i.
+  (AttackerAsymetricStep( A, B, rk, rkother ) @ #i)"
+*/
+by sorry
+
+lemma attack_pcs:
+  exists-trace
+  "∃ A B rk rk2 #i #j #k #l.
+    ((((((ConversationStartChainRk( A, B, rk ) @ #i) ∧
+         (!KU( rk ) @ #j)) ∧
+        (ConversationHeal( A, B, rk2 ) @ #l)) ∧
+       (#l < #i)) ∧
+      (CompromisePartie( A, B ) @ #k)) ∧
+     (#k < #l)) ∧
+    (∀ #x #y.
+      ((CompromisePartie( A, B ) @ #x) ∧
+       (CompromisePartie( A, B ) @ #y)) ⇒
+      (#x = #y))"
+/*
+guarded formula characterizing all satisfying traces:
+"∃ A B rk rk2 #i #j #k #l.
+  (ConversationStartChainRk( A, B, rk ) @ #i) ∧
+  (!KU( rk ) @ #j) ∧
+  (ConversationHeal( A, B, rk2 ) @ #l) ∧
+  (CompromisePartie( A, B ) @ #k)
+ ∧
+  (#l < #i) ∧
+  (#k < #l) ∧
+  (∀ #x #y.
+    (CompromisePartie( A, B ) @ #x) ∧ (CompromisePartie( A, B ) @ #y)
+   ⇒
+    #x = #y)"
+*/
+simplify
+solve( CompromisePartie( A, B ) @ #k )
+  case CompromiseReceiving
+  by sorry
+next
+  case CompromiseSender
+  solve( SendingChainKey( ~rk, ~tidA, A, B, h(sck) ) ▶₀ #k )
+    case CompromiseSender
+    by contradiction /* cyclic */
+  next
+    case InitKeyExchange_case_1
+    solve( BookKeppingGlobalRootKeys( ~tidA, $id, ~rk ) ▶₁ #k )
+      case CompromiseSender
+      by contradiction /* cyclic */
+    next
+      case InitKeyExchange
+      solve( ConversationHeal( $id, $id.1, rk2 ) @ #l )
+        case SendReceiveAsymetric_case_1
+        solve( SendingChainKey( ~rk.1, ~tidA.1, $id, $id.1, ck ) ▶₀ #l )
+          case CompromiseSender
+          by sorry
+        next
+          case InitKeyExchange_case_1
+          solve( !ReceivingChainKey( ~tidB, ~rk.1, $id.1, $id, h(~rk.1)
+                 ) ▶₁ #l )
+            case InitKeyExchange
+            solve( BookKeppingRootKeys( ~tidA.1, $id, ~rk.1 ) ▶₂ #l )
+              case InitKeyExchange
+              solve( BookKeppingRootKeys( ~tidB, $id.1, ~rk.1 ) ▶₃ #l )
+                case InitKeyExchange
+                solve( BookKeppingGlobalRootKeys( ~tidA.1, $id, ~rk.1 ) ▶₄ #l )
+                  case InitKeyExchange
+                  solve( BookKeppingGlobalRootKeys( ~tidB, $id.1, ~rk.1 ) ▶₅ #l )
+                    case InitKeyExchange
+                    solve( ConversationStartChainRk( $id, $id.1, rk.2 ) @ #i )
+                      case InitKeyExchange_case_1
+                      by sorry
+                    next
+                      case InitKeyExchange_case_2
+                      by sorry
+                    next
+                      case SendReceiveAsymetric_ReceiveToSend
+                      by sorry
+                    next
+                      case SendReceiveAsymetric_SendToReceive
+                      solve( SendingChainKey( ~rk, ~tidA, $id, $id.1, sck ) ▶₀ #i )
+                        case CompromiseSender
+                        solve( BookKeppingRootKeys( ~tidA, $id, ~rk ) ▶₂ #i )
+                          case InitKeyExchange
+                          solve( BookKeppingGlobalRootKeys( ~tidA, $id, ~rk ) ▶₃ #i )
+                            case CompromiseSender
+                            solve( !KU( ~new_rk ) @ #j )
+                              case SendReceiveAsymetric_SendToReceive
+                              solve( !KU( h(~rk) ) @ #vk )
+                                case CompromiseReceiving_case_1
+                                SOLVED // trace found
+                              next
+                                case CompromiseReceiving_case_2
+                                by sorry
+                              next
+                                case CompromiseReceiving_case_3
+                                by sorry
+                              next
+                                case CompromiseSender
+                                solve( SendingChainKey( ~rk.2, ~tidA.2, A, B, h(~rk) ) ▶₀ #vr.8 )
+                                  case CompromiseSender
+                                  by contradiction /* cyclic */
+                                next
+                                  case InitKeyExchange
+                                  SOLVED // trace found
+                                next
+                                  case SendSymetric
+                                  by sorry
+                                qed
+                              next
+                                case c_h
+                                by solve( !KU( ~rk ) @ #vk.1 )
+                              qed
+                            qed
+                          next
+                            case SendSymetric
+                            by contradiction /* cyclic */
+                          qed
+                        qed
+                      next
+                        case InitKeyExchange_case_1
+                        by sorry
+                      next
+                        case InitKeyExchange_case_2
+                        by sorry
+                      next
+                        case InitKeyExchange_case_3
+                        by sorry
+                      next
+                        case InitKeyExchange_case_4
+                        by sorry
+                      next
+                        case SendReceiveAsymetric
+                        by sorry
+                      next
+                        case SendReceiveAsymetric_ReceiveToSend_case_1
+                        by sorry
+                      next
+                        case SendReceiveAsymetric_ReceiveToSend_case_2
+                        by sorry
+                      next
+                        case SendReceiveAsymetric_ReceiveToSend_case_3
+                        by sorry
+                      next
+                        case SendReceiveAsymetric_ReceiveToSend_case_4
+                        by sorry
+                      next
+                        case SendReceiveAsymetric_ReceiveToSend_case_5
+                        by sorry
+                      next
+                        case SendReceiveAsymetric_ReceiveToSend_case_6
+                        by sorry
+                      next
+                        case SendReceiveAsymetric_ReceiveToSend_case_7
+                        by sorry
+                      next
+                        case SendReceiveAsymetric_ReceiveToSend_case_8
+                        by sorry
+                      next
+                        case SendSymetric
+                        by sorry
+                      qed
+                    next
+                      case SendReceiveAsymetric_case_1
+                      by sorry
+                    next
+                      case SendReceiveAsymetric_case_2
+                      by sorry
+                    qed
+                  qed
+                next
+                  case SendSymetric
+                  by contradiction /* cyclic */
+                qed
+              qed
+            qed
+          next
+            case ReceiveSymetric
+            by sorry
+          next
+            case ReceiveSymetricSkip
+            by sorry
+          qed
+        next
+          case InitKeyExchange_case_2
+          by sorry
+        next
+          case InitKeyExchange_case_3
+          by sorry
+        next
+          case InitKeyExchange_case_4
+          by sorry
+        next
+          case SendReceiveAsymetric
+          by sorry
+        next
+          case SendReceiveAsymetric_ReceiveToSend_case_1
+          by sorry
+        next
+          case SendReceiveAsymetric_ReceiveToSend_case_2
+          by sorry
+        next
+          case SendReceiveAsymetric_ReceiveToSend_case_3
+          by sorry
+        next
+          case SendReceiveAsymetric_ReceiveToSend_case_4
+          by sorry
+        next
+          case SendReceiveAsymetric_ReceiveToSend_case_5
+          by sorry
+        next
+          case SendReceiveAsymetric_ReceiveToSend_case_6
+          by sorry
+        next
+          case SendReceiveAsymetric_ReceiveToSend_case_7
+          by sorry
+        next
+          case SendReceiveAsymetric_ReceiveToSend_case_8
+          by sorry
+        next
+          case SendSymetric
+          by sorry
+        qed
+      next
+        case SendReceiveAsymetric_case_2
+        by sorry
+      qed
+    next
+      case SendSymetric
+      by contradiction /* cyclic */
+    qed
+  next
+    case InitKeyExchange_case_2
+    by sorry
+  next
+    case InitKeyExchange_case_3
+    by sorry
+  next
+    case InitKeyExchange_case_4
+    by sorry
+  next
+    case SendReceiveAsymetric
+    by sorry
+  next
+    case SendReceiveAsymetric_ReceiveToSend_case_1
+    by sorry
+  next
+    case SendReceiveAsymetric_ReceiveToSend_case_2
+    by sorry
+  next
+    case SendReceiveAsymetric_ReceiveToSend_case_3
+    by sorry
+  next
+    case SendReceiveAsymetric_ReceiveToSend_case_4
+    by sorry
+  next
+    case SendReceiveAsymetric_ReceiveToSend_case_5
+    by sorry
+  next
+    case SendReceiveAsymetric_ReceiveToSend_case_6
+    by sorry
+  next
+    case SendReceiveAsymetric_ReceiveToSend_case_7
+    by sorry
+  next
+    case SendReceiveAsymetric_ReceiveToSend_case_8
+    by sorry
+  next
+    case SendSymetric
+    by sorry
+  qed
+qed
+
+
+end

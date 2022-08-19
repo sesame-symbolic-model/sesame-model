@@ -1,0 +1,5451 @@
+/*
+ *  Author: 
+ *  Model Name: DoubleRatchet.spthy
+ *  Status: FINISHED
+ *
+
+$ tamarin-prover --prove DoubleRatchet.spthy 
+
+==============================================================================
+summary of summaries:
+
+analyzed: DoubleRatchet.spthy
+
+  can_create_user (exists-trace): verified (5 steps)
+  can_key_exchange (exists-trace): verified (4 steps)
+  can_receive_sym_message (exists-trace): verified (8 steps)
+  can_receive_attacker (exists-trace): verified (8 steps)
+  can_ratchet_attacker (exists-trace): verified (7 steps)
+  SameRootKey (all-traces): verified (18 steps)
+  stGlobalSendingChainKey (all-traces): verified (31 steps)
+  stReceiverChainKey (all-traces): verified (21 steps)
+  GlobalSendChainPreceededByStartChain (all-traces): verified (32 steps)
+  ReceiveChainPreceededByStartChain (all-traces): verified (22 steps)
+  StartChainAtom (all-traces): verified (4 steps)
+  OriginSendingChainKey (all-traces): verified (59 steps)
+  OriginReceivingChainKey (all-traces): verified (24 steps)
+  SameChainKeysMeansSameRootKey (all-traces): verified (230 steps)
+  SameSendingChainMeansSameRootKey (all-traces): verified (54 steps)
+  SameReceiveChainMeansSameRootKey (all-traces): verified (54 steps)
+  NoSessionWithSelf (all-traces): verified (19 steps)
+  NoDoubleRole (all-traces): verified (244 steps)
+  NoDoubleRoleSt1 (all-traces): verified (30 steps)
+  NoDoubleRoleSt2 (all-traces): verified (36 steps)
+  SameChainKeysMeansSameRootKeyBis (all-traces): verified (618 steps)
+  SameSendingChainMeansSameRootKeyBis2 (all-traces): verified (26 steps)
+  SameReceiveChainMeansSameRootKeyBis (all-traces): verified (330 steps)
+  SameSendingChainMeansSameRootKeyBis3 (all-traces): verified (54 steps)
+  MonotonousAfterSend (all-traces): verified (745 steps)
+  AsymmetricNeedsCompromiseBefore (all-traces): verified (1559 steps)
+  ForwardSecrecySender (all-traces): verified (12 steps)
+  singleInitKE (all-traces): verified (64 steps)
+  rkImpo (all-traces): verified (542 steps)
+  rkImpoBis (all-traces): verified (196 steps)
+  PCSrk (all-traces): verified (718 steps)
+  PCS (all-traces): verified (9 steps)
+  StartChainPreceededByAssociate (all-traces): verified (119 steps)
+  SameTidKey (all-traces): verified (597 steps)
+  PCS_Conversation (all-traces): verified (61 steps)
+
+==============================================================================
+
+179.97s user 
+53.86s system 
+343% cpu 
+1:08.13 total
+
+ */
+
+
+
+theory DoubleRatchet
+begin
+
+heuristic: o "oracle.py"
+functions: kdf/2
+builtins: hashing, symmetric-encryption, signing
+
+/****************************************************************************************************
+*
+*                                                 RESTRICTIONS
+*
+****************************************************************************************************/
+
+/* We restrict that the attacker can compromise a root key only once, since every other key in the chain can be computed by hashing forward.
+  The restriction removes looping behaviours.
+*/
+restriction CompromiseOnceSending:
+"
+All A B rk #i #j. CompromiseSending(A, B, rk)@i & CompromiseSending(A, B, rk)@j ==> #i=#j 
+"
+
+restriction CompromiseOnceReceiving:
+"
+All A B rk #i #j. CompromiseReceiving(A, B, rk)@i & CompromiseReceiving(A, B, rk)@j ==> #i=#j 
+"
+
+/* Restrict that an asymmetric step can be performed once, since responder is a persistent fact and one can skip messages.
+*/
+restriction SingleAsymmetricStep:
+"
+All B A rk new_rk #i #j. AsymetricStepB(B, A, rk, new_rk)@i & AsymetricStepB(B, A, rk, new_rk)@j ==> #i = #j
+"
+
+restriction SingleAsymmetricStepBis:
+"
+All B A rk new_rk new_rk2 #i #j. AsymetricStepB(B, A, rk, new_rk)@i & AttackerAsymetricStep(B, A, rk, new_rk2)@j ==> F
+"
+
+
+// Restrictions on receive once and skip once. The receiver can only skip or receive a message once.
+restriction SingleReceive:
+"
+All B A rck#i #j. ReceiveOnce(B, A, rck)@i & ReceiveOnce(B, A, rck)@j ==> #i = #j
+"
+restriction SingleSkip:
+"
+All B A rck#i #j. SkipOnce(B, A, rck)@i & SkipOnce(B, A, rck)@j ==> #i = #j
+"
+
+restriction SingleDevice:
+"
+All id s1 s2 #i #j. CreateDevice(id, s1)@i &   CreateDevice(id, s2)@j ==> #i = #j
+"
+
+// Cannot start session with self.
+restriction NotStartSessionWithSelf:
+"
+All A B #i. AssociateDevice(A, B)@i ==> not(A=B)
+"
+
+// Restriction to model the single session of DR analysis
+restriction SingleSessionWithSmbd:
+"
+All A B #i #j. AssociateDevice(A, B)@i &  AssociateDevice(A, B)@j  ==> #i = #j
+"
+
+
+/****************************************************************************************************
+*
+*                                                  PROTOCOL
+*
+****************************************************************************************************/
+
+
+/* Create a user device with an identity key
+*/
+rule CreateDevice[color= FDFCDC]:
+    [ Fr(~sk)]
+  --[ CreateDevice($id, ~sk) ]->
+    [ !Partie($id, ~sk) ]
+
+
+
+/*****************************************
+*
+* Inititalize
+*
+*****************************************/
+
+/* Initialize the communication channel.
+*/
+rule Init[color= FBD1A2]:
+    [ !Partie(A, skA),
+      !Partie(B, skB)
+       ]
+  --[ AssociateDevice(A, B),
+      AssociateDevice(B, A)  ]->
+    [ UserState(A, B, skA, pk(skB)), 
+      UserState(B, A, skB, pk(skA))
+    ]
+
+/* Initialize the key exchange of the two communicating parties: 
+*  -- Choose a common root key
+*  -- Create a sending chain key for A and a respective receiver chain key for B.
+*/
+rule InitKeyExchange[color= FBD1A2]:
+    [ UserState(A, B, skA, pk(skB)), 
+      UserState(B, A, skB, pk(skA)),
+      Fr(~rk),
+      Fr(~tidA),
+      Fr(~tidB)
+       ]
+  --[ KeyExchange(A, B, ~rk),
+      InitKeyExchange(A, B),      
+      InitKeyExchange(B, A),   
+      StartChainRk(~tidA,A, B, ~rk),
+      StartChainRk(~tidB,B, A, ~rk),
+      ConversationStartChainRk( A, B, ~rk ),
+      ConversationStartChainRk( B, A, ~rk ),
+      StartChainRkSnd(~tidA,A, B, ~rk),
+      StartChainRkRcv(~tidB,B, A, ~rk)
+]->
+    [ SendingChainKey(~rk,~tidA, A, B, h(~rk)), 
+      !ReceivingChainKey(~tidB,~rk, B, A, h(~rk)),
+       BookKeppingRootKeys(~tidA, A, ~rk),
+       BookKeppingRootKeys(~tidB, B , ~rk  ),
+       BookKeppingGlobalRootKeys(~tidA, A, ~rk),
+       BookKeppingGlobalRootKeys(~tidB, B , ~rk  )
+    ]
+
+
+/*****************************************
+*
+* Asymmetric Ratchet
+*
+*****************************************/  
+
+/* In the asymmetric ratchet, A and B forward the root key, instead we derive a fresh root key to replace the old one. 
+   In this step, the parties switch roles from sender to receiver and derive the new sending/receiving chain keys.
+   We abstract to derive a new root key instead of ratcheting forward, therefore both parties are healed at the same time.
+*/
+rule SendReceiveAsymetric[color= 00b2ca]:
+    [ SendingChainKey(~rk,~tidA, A, B, ck),
+    !ReceivingChainKey(~tidB,~rk, B, A, ck),
+    BookKeppingRootKeys(~tidA, A, ~rk  ),
+    BookKeppingRootKeys(~tidB, B, ~rk),
+    BookKeppingGlobalRootKeys(~tidA, A, ~rk  ),
+    BookKeppingGlobalRootKeys(~tidB, B, ~rk),
+     Fr(~new_rk)
+    ]
+  --[ AsymetricStep(A, B, ck, ~new_rk),
+      AsymetricStepB(B, A, ~rk, ~new_rk) ,
+      Heal(~tidA,A, ~rk), 
+      Heal(~tidB,B, ~rk),
+      ConversationHeal( A, B, ~rk ),
+      ConversationHeal( B, A, ~rk ), 
+      KeyUpdate( ~rk, ~new_rk ),
+      StartChainRk(~tidA,A, B, ~new_rk),
+      StartChainRk(~tidB,B, A, ~new_rk),
+      ConversationStartChainRk( A, B, ~new_rk ),
+      ConversationStartChainRk( B, A, ~new_rk ),
+      StartChainRkRcv(~tidA,A, B, ~new_rk),
+      StartChainRkSnd(~tidB,B, A, ~new_rk),      
+      ]->
+    [ SendingChainKey(~new_rk,~tidB, B, A, h(~new_rk)),
+      !ReceivingChainKey(~tidA,~new_rk, A, B, h(~new_rk)),
+      BookKeppingRootKeys(~tidA, A, ~new_rk),
+      BookKeppingRootKeys(~tidB, B , ~new_rk  ),
+      BookKeppingGlobalRootKeys(~tidA, A, ~new_rk),
+      BookKeppingGlobalRootKeys(~tidB, B , ~new_rk  )
+
+
+    ]
+
+
+/*****************************************
+*
+* Attacker Asymmetric Ratchet
+*
+*****************************************/  
+
+/* After compromising one of the agents, the attacker should be able to trigger asymetric ratchets.
+   SendReceiveAsymetric_ReceiveToSend - Attacker's partner goes from receiver to sender
+   SendReceiveAsymetric_SendToReceive - attacker's partner goes from sender to receiver
+   Attacker shows its knows the current chain key.
+*/
+
+//Attacker performs asymmetric step with receiver
+rule SendReceiveAsymetric_ReceiveToSend[color= 00b2ca]:
+    [ In(rck) ,
+    !ReceivingChainKey(~tidB,~rk, B, A, rck),
+     BookKeppingRootKeys(~tidB, B , ~rk  ),
+     BookKeppingGlobalRootKeys(~tidB, B , ~rk  ),
+     Fr(~new_rk)
+    ]
+  --[ 
+      AttackerAsymetricStep(B, A, ~rk, ~new_rk),
+      KeyUpdate(~rk, ~new_rk),
+      ConversationStartChainRk( B, A, ~new_rk ),
+      StartChainRk(~tidB,B, A, ~new_rk),
+      StartChainRkSnd(~tidB,B, A, ~new_rk)      
+      ]->
+    [ SendingChainKey(~new_rk,~tidB, B, A, h(~new_rk)),
+      BookKeppingRootKeys(~tidB,  B , ~new_rk  ),
+      BookKeppingGlobalRootKeys(~tidB,  B , ~new_rk  ),
+      Out(~new_rk)
+    ]
+
+//Attacker performs asymmetric step with sender
+rule SendReceiveAsymetric_SendToReceive[color= 00b2ca]:
+    [ SendingChainKey(~rk, ~tidA, A, B, sck),
+     In(sck) ,
+     BookKeppingRootKeys(~tidA, A, ~rk  ),
+     BookKeppingGlobalRootKeys(~tidA, A, ~rk  ),
+     Fr(~new_rk)
+    ]
+  --[ AttackerAsymetricStep(A, B, ~rk, ~new_rk),
+      StartChainRk(~tidA,A, B, ~new_rk),
+      ConversationStartChainRk( A, B, ~new_rk ),
+      StartChainRkRcv(~tidA,A, B, ~new_rk),      
+      KeyUpdate(~rk, ~new_rk)
+      ]->
+    [ Out(~new_rk),
+     BookKeppingRootKeys(~tidA, A, ~new_rk  )  ,  
+     BookKeppingGlobalRootKeys(~tidA, A, ~new_rk  )  ,  
+     !ReceivingChainKey(~tidA,~new_rk, A, B, h(~new_rk))
+    ]
+
+/*****************************************
+*
+* Symmetric Ratchet
+*
+*****************************************/
+
+/* The sender ecrypt a fresh message and forwards the chain key.
+*/
+rule SendSymetric[color= 7DCFB6]:
+    [ SendingChainKey(~rk, ~tidA, A, B, sck),
+     BookKeppingGlobalRootKeys(~tidA, A, ~rk  ),
+     Fr(~payload)
+    ]
+  --[ SendMessage(A, B, ~rk, sck, ~payload),
+      SendPayload(A, B, ~rk, ~payload),
+      SendChainKey(A, B, ~rk, sck),
+      GlobalSendChainKey(~tidA,A, B, ~rk, sck)
+    ]->
+    [ Out(senc(~payload, sck)),
+      SendingChainKey(~rk, ~tidA, A, B, h(sck)),
+       BookKeppingGlobalRootKeys(~tidA, A, ~rk  )
+    ]
+
+
+/*  Receiver receive a message and forwards the receiving chain key.
+*/
+rule ReceiveSymetric[color= F79256]:
+    [ !ReceivingChainKey(~tidB,~rk, B, A, rck),
+      In(senc(payload, rck))
+    ]
+  --[ ReceivedMessage(B, A, ~rk, rck, payload),
+      ReceiveOnce(B, A, rck),
+      ReceiverChain(~tidB,B, A, ~rk, rck)  ]-> 
+    [!ReceivingChainKey(~tidB,~rk, B, A, h(rck))
+    ]
+    
+
+/*  Receiver skips a message and forwards the receiving chain key.
+*/
+rule ReceiveSymetricSkip[color= F79256]:
+    [ !ReceivingChainKey(~tidB,~rk, B, A, rck),
+      In(senc(payload, rck))
+    ]
+  --[ NotReceivedMessage(B, A, ~rk, rck, payload),
+      SkipOnce(B, A, rck),
+      ReceiverChain(~tidB,B, A, ~rk, rck)
+        ]-> 
+    [!ReceivingChainKey(~tidB,~rk, B, A, h(rck))
+    ]
+    
+    
+/*****************************************
+*
+* Attacker Compromise
+*
+*****************************************/ 
+
+/* The attacker compromises the state of one of the parties, and learn the session's root key rk and sending/receiving chain key sck/rck.
+   Root key rk is kept in the state only for bookkeeping, we do not consider it to be part of the state as the normal rk in the DR. 
+   The reason for that is that the rk, in the real DR is derived from the old one, and we abstract by creating a fresh rk on every ratchet. 
+*/
+
+// Attacker compromises the sender and learn the current rk and sending chain key sck
+rule CompromiseSender[color= ea3546]:
+    [ SendingChainKey(~rk, ~tidA, A, B, h(sck)),
+     BookKeppingGlobalRootKeys(~tidA, A, ~rk  ) ]
+  --[ 
+      CompromiseSending(A, B, ~rk),
+      CompromiseChain(A, B, h(sck)),
+      CompromisePartie(A, B),
+      GlobalSendChainKey(~tidA,A, B, ~rk, h(sck))
+    ]->
+    [ SendingChainKey(~rk, ~tidA, A, B, h(sck)),
+     BookKeppingGlobalRootKeys(~tidA, A, ~rk  ),
+       Out(h(sck)) ]
+
+
+// Attacker compromises the receiver and learn the a rk and receiving chain key rck
+rule CompromiseReceiving[color= ea3546]:
+    [ !ReceivingChainKey(~tidB,~other_rk, A, B, h(rck))]
+  --[ 
+      CompromiseReceiving(A, B, ~other_rk),
+      CompromiseChain(A, B, h(rck)),
+      CompromisePartie(A, B)
+ ]->
+    [ Out(h(rck)) ]
+
+/****************************************************************************************************
+*
+*                                                   LEMMA
+*
+****************************************************************************************************/
+
+// BEGIN SANITY LEMMA
+lemma can_create_user: exists-trace
+  "Ex A B  #i.
+  AssociateDevice(A, B) @ i"
+
+lemma can_key_exchange: exists-trace
+  "Ex A B rk #i.
+  KeyExchange(A, B, rk) @ i"
+
+lemma can_receive_sym_message: exists-trace
+  "Ex A B rk rck payload #i.
+  ReceivedMessage(A, B, rk, rck, payload) @ i"
+
+lemma can_receive_attacker: exists-trace
+  "Ex A B rk rck payload #i #j.
+  ReceivedMessage(A, B, rk, rck, payload) @ i
+  & KU(payload)@j"
+
+lemma can_ratchet_attacker: exists-trace
+  "Ex A B rk rkother #i.
+  AttackerAsymetricStep(A, B, rk, rkother) @ i"
+
+/***************************************
+
+        Loop breakers
+
+***************************************/
+
+lemma SameRootKey[reuse, use_induction]:
+"
+All A B rk tid #i #j. StartChainRk(tid, A, B, rk)@i & StartChainRk(tid, A, B, rk) @j
+==> #i=#j
+"
+
+lemma stGlobalSendingChainKey[reuse, use_induction]:
+"
+All A B rk sck tid #i. GlobalSendChainKey(tid,A, B, rk, sck)@i
+==> rk << sck
+"
+
+lemma stReceiverChainKey[reuse, use_induction]:
+"
+All A B rk sck tid #i. ReceiverChain(tid,A, B, rk, sck)@i
+==> rk << sck
+"
+
+lemma GlobalSendChainPreceededByStartChain[reuse, use_induction]:
+"
+All A B rk sck tid #i. GlobalSendChainKey(tid,A, B, rk, sck)@i
+==> Ex #j. StartChainRk(tid, A, B, rk) @j & j<i 
+"
+
+ lemma ReceiveChainPreceededByStartChain[reuse, use_induction]:
+"
+All A B rk sck tid #i. ReceiverChain(tid,A, B, rk, sck)@i
+==> Ex #j. StartChainRk(tid,A, B, rk) @j & j<i 
+"
+
+lemma StartChainAtom[reuse, use_induction]:
+"
+All A B rk tid #j. StartChainRk(tid,A, B, h(rk))@j ==> F
+"
+
+lemma OriginSendingChainKey[reuse, use_induction, hide_lemma=GlobalSendChainPreceededByStartChain,hide_lemma=ReceiveChainPreceededByStartChain]:
+"
+All A B rk sck tid #i. GlobalSendChainKey(tid,A, B, rk, sck)@i
+==> 
+ (sck=h(rk))
+| Ex pck #j. sck=h(pck) &  GlobalSendChainKey(tid,A, B, rk, pck)@j & j<i 
+"
+
+ lemma OriginReceivingChainKey[reuse, use_induction, hide_lemma=GlobalSendChainPreceededByStartChain,hide_lemma=ReceiveChainPreceededByStartChain]:
+"
+All A B rk sck tid #i. ReceiverChain(tid,A, B, rk, sck)@i
+==>
+ (sck=h(rk))
+| Ex pck #j. sck=h(pck) &  ReceiverChain(tid,A, B, rk, pck)@j & j<i 
+"
+
+lemma SameChainKeysMeansSameRootKey[reuse, use_induction]:
+"
+All A B rk rk2 sck tid tid2 #i #j. GlobalSendChainKey(tid,A, B, rk, sck)@i & ReceiverChain(tid2,B, A, rk2, sck)@j
+==> rk=rk2 
+"
+
+lemma SameSendingChainMeansSameRootKey[reuse, use_induction]:
+"
+All A B rk rk2 sck tid tid2 #i #j. GlobalSendChainKey(tid,A, B, rk, sck)@i & GlobalSendChainKey(tid2,B, A, rk2, sck)@j
+==> rk=rk2
+"
+
+lemma SameReceiveChainMeansSameRootKey[reuse, use_induction]:
+"
+All A B rk rk2 sck tid tid2 #i #j. ReceiverChain(tid,A, B, rk, sck)@i & ReceiverChain(tid2,B, A, rk2, sck)@j
+==> rk=rk2
+"
+
+lemma NoSessionWithSelf[reuse, use_induction]:
+"
+(All A rk sck tid #i. GlobalSendChainKey(tid,A, A, rk, sck)@i
+==> F)
+&
+(All A rk sck tid #i. ReceiverChain(tid,A, A, rk, sck)@i
+==> F)
+&
+(All A rk tid #i.  StartChainRk(tid,A, A, rk)@i
+==> F)
+"
+
+// It cannot be that a partie both sends and receives with the same chain key sck
+lemma NoDoubleRole[reuse, use_induction,hide_lemma=GlobalSendChainPreceededByStartChain,hide_lemma=ReceiveChainPreceededByStartChain, hide_lemma=OriginSendingChainKey, hide_lemma=OriginReceivingChainKey]:
+"
+All A B rk rk2 tid tid2 sck #i #j. GlobalSendChainKey(tid,A, B, rk, sck)@i & ReceiverChain(tid2,A, B, rk2, sck)@j
+==> F
+"
+
+// It cannot be that a partie sends using the root key
+lemma NoDoubleRoleSt1[reuse, use_induction,hide_lemma=GlobalSendChainPreceededByStartChain,hide_lemma=ReceiveChainPreceededByStartChain, hide_lemma=OriginSendingChainKey, hide_lemma=OriginReceivingChainKey]:
+"
+All A B rk tid tid2 sck #i #j. GlobalSendChainKey(tid,A, B, rk, sck)@i &  StartChainRkRcv(tid2,A, B, rk)@j
+==> F
+"
+
+// It cannot be that a partie receives using the root key
+lemma NoDoubleRoleSt2[reuse, use_induction,hide_lemma=GlobalSendChainPreceededByStartChain,hide_lemma=ReceiveChainPreceededByStartChain, hide_lemma=OriginSendingChainKey, hide_lemma=OriginReceivingChainKey]:
+"
+All A B rk tid tid2 sck #i #j.  StartChainRkSnd(tid,A, B, rk)@i & ReceiverChain(tid2,A, B, rk, sck)@j
+==> F
+"
+
+// Same sending chain key sck implies same root key rk and same A / B (with correct order)
+lemma SameChainKeysMeansSameRootKeyBis[reuse, use_induction]:
+"
+All A B A2 B2 rk rk2 sck tid tid2 #i #j. GlobalSendChainKey(tid,A, B, rk, sck)@i & ReceiverChain(tid2,B2, A2, rk2, sck)@j
+==> rk=rk2 & B=B2 & A=A2
+"
+
+// Same sending chain key sck implies same root key rk and same A / B (with correct order)for the same thread id
+lemma SameSendingChainMeansSameRootKeyBis2[reuse, use_induction]:
+"
+All A B A2 B2 rk rk2 sck  tid  #i #j. GlobalSendChainKey(tid,A, B, rk, sck)@i & GlobalSendChainKey(tid,A2, B2, rk2, sck)@j
+==> rk=rk2 & B=B2 & A=A2 
+"
+
+// Same receiving chain key rck implies same root key rk and same A / B (with correct order)
+lemma SameReceiveChainMeansSameRootKeyBis[reuse, use_induction]:
+"
+All A B A2 B2 rk rk2 sck tid tid2 #i #j. ReceiverChain(tid,A, B, rk, sck)@i & ReceiverChain(tid2,A2, B2, rk2, sck)@j
+==> rk=rk2 & B=B2 & A=A2 
+"
+
+// Same sending chain key implies same thread id
+lemma SameSendingChainMeansSameRootKeyBis3[reuse, use_induction]:
+"
+All A B A2 B2 rk  rk2 sck  tid tid2 #i #j. GlobalSendChainKey(tid,A, B, rk, sck)@i & GlobalSendChainKey(tid2,A2, B2, rk2, sck)@j
+==>  tid=tid2
+"
+
+// The sending chain keys are monotonously increasing sck_i+1=h(sck_i)
+lemma MonotonousAfterSend[reuse, use_induction, heuristic=S,  hide_lemma=OriginSendingChainKey,hide_lemma=OriginReceivingChainKey]:
+"
+All A B rk sck sck2 tid #i #j. GlobalSendChainKey(tid,A, B, rk, sck)@i & SendChainKey(A, B, rk, sck2)[+]@j & j < i ==> sck2 << sck 
+"
+
+// Forward secrecy helper lemma
+lemma AsymmetricNeedsCompromiseBefore[reuse, use_induction]:
+"
+(All A B rk sck #i. AttackerAsymetricStep(A, B, rk, sck)@i
+==> (Ex  #k. CompromisePartie(A, B)@k & k < i)
+   | (Ex #k. CompromisePartie(B, A)@k & k < i ) 
+)
+&
+(All A B rk sck #i #j. SendChainKey(A, B, rk, sck)@i & KU(sck)@j
+==> (Ex  #k. CompromisePartie(A, B)@k & k < i) 
+   | (Ex #k. CompromisePartie(B, A)@k & k < j) 
+)
+&
+(All A B rk sck tid #i #j. ReceiverChain(tid,A, B, rk, sck)@i & KU(sck)@j
+==> 
+    (Ex  #k. CompromisePartie(A,B)@k & k<j ) 
+  |  (Ex  #k. CompromisePartie(B, A)@k & k<j ) 
+   
+)
+"
+
+// FORWARD SECRECY
+lemma ForwardSecrecySender[reuse, use_induction]:
+"
+(All A B rk sck #i #j. SendChainKey(A, B, rk, sck)@i & KU(sck)@j
+==> (Ex  #k. CompromisePartie(A, B)@k & k < i) 
+   | (Ex #k. CompromisePartie(B, A)@k ) 
+)
+"
+
+/***************************************
+
+        Post-Compromise Security
+
+***************************************/
+
+// Single Key Exchange per pair of users
+lemma singleInitKE[reuse]:
+"
+All A B #i #j. InitKeyExchange(A,B)@j & InitKeyExchange(A,B)@i
+==> #i=#j
+"
+
+lemma rkImpo[reuse, use_induction]:
+"
+All A B rk rk2 rk3 tid #i #j #l. StartChainRk(tid,A, B, rk)@i &  StartChainRk(tid,A, B, rk3)@l & KeyUpdate(rk,rk3)@l & i < l    &     StartChainRk(tid,A, B, rk2)@j  
+==>    ( #i=#j |   j< i | l < j   | #j = #l)
+"
+
+lemma rkImpoBis[reuse, use_induction]:
+"
+All A B rk rk2 rk3 sck tid #i #j #l. StartChainRk(tid,A, B, rk)@i &  StartChainRk(tid,A, B, rk3)@l  & i < l    &  GlobalSendChainKey(tid,A, B, rk2, sck )@j & l<j
+==>   not(rk=rk2) 
+"
+
+// PCS helper lemma
+lemma PCSrk [reuse, use_induction, hide_lemma=ForwardSecrecySender,
+             hide_lemma=AsymmetricNeedsCompromiseBefore]:
+  all-traces
+  "((∀ A B rk rk2 tid tid2 #i #j #l.
+      (((((StartChainRk( tid, A, B, rk ) @ #i) ∧ (!KU( rk ) @ #j)) ∧
+         (Heal( tid2, B, rk2 ) @ #l)) ∧
+        (Heal( tid, A, rk2 ) @ #l)) ∧
+       ((#l < #i) ∨ (#l = #i))) ⇒
+      ((∃ #k. (CompromisePartie( A, B ) @ #k) ∧ (#l < #k)) ∨
+       (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ (#l < #k)))) ∧
+    (∀ A B rk sck rk2 tid tid2 #i #j #l.
+      (((((GlobalSendChainKey( tid, A, B, rk, sck ) @ #i) ∧
+          (!KU( sck ) @ #j)) ∧
+         (Heal( tid2, B, rk2 ) @ #l)) ∧
+        (Heal( tid, A, rk2 ) @ #l)) ∧
+       ((#l < #i) ∨ (#l = #i))) ⇒
+      ((∃ #k. (CompromisePartie( A, B ) @ #k) ∧ (#l < #k)) ∨
+       (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ (#l < #k))))) ∧
+   (∀ A B rk rk2 sck tid tid2 #i #j #l #r.
+     ((((((ReceiverChain( tid, A, B, rk, sck ) @ #i) ∧
+          (!KU( sck ) @ #j)) ∧
+         (Heal( tid2, B, rk2 ) @ #l)) ∧
+        (Heal( tid, A, rk2 ) @ #l)) ∧
+       (StartChainRk( tid, A, B, rk ) @ #r)) ∧
+      ((#l < #r) ∨ (#l = #r))) ⇒
+     ((∃ #k. (CompromisePartie( A, B ) @ #k) ∧ (#l < #k)) ∨
+      (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ (#l < #k))))"
+/*
+guarded formula characterizing all counter-examples:
+"((∃ A B rk rk2 tid tid2 #i #j #l.
+    (StartChainRk( tid, A, B, rk ) @ #i) ∧
+    (!KU( rk ) @ #j) ∧
+    (Heal( tid2, B, rk2 ) @ #l) ∧
+    (Heal( tid, A, rk2 ) @ #l)
+   ∧
+    (((#l < #i) ∨ (#l = #i))) ∧
+    (∀ #k. (CompromisePartie( A, B ) @ #k) ⇒ ¬(#l < #k)) ∧
+    (∀ #k. (CompromisePartie( B, A ) @ #k) ⇒ ¬(#l < #k))) ∨
+  (∃ A B rk sck rk2 tid tid2 #i #j #l.
+    (GlobalSendChainKey( tid, A, B, rk, sck ) @ #i) ∧
+    (!KU( sck ) @ #j) ∧
+    (Heal( tid2, B, rk2 ) @ #l) ∧
+    (Heal( tid, A, rk2 ) @ #l)
+   ∧
+    (((#l < #i) ∨ (#l = #i))) ∧
+    (∀ #k. (CompromisePartie( A, B ) @ #k) ⇒ ¬(#l < #k)) ∧
+    (∀ #k. (CompromisePartie( B, A ) @ #k) ⇒ ¬(#l < #k))) ∨
+  (∃ A B rk rk2 sck tid tid2 #i #j #l #r.
+    (ReceiverChain( tid, A, B, rk, sck ) @ #i) ∧
+    (!KU( sck ) @ #j) ∧
+    (Heal( tid2, B, rk2 ) @ #l) ∧
+    (Heal( tid, A, rk2 ) @ #l) ∧
+    (StartChainRk( tid, A, B, rk ) @ #r)
+   ∧
+    (((#l < #r) ∨ (#l = #r))) ∧
+    (∀ #k. (CompromisePartie( A, B ) @ #k) ⇒ ¬(#l < #k)) ∧
+    (∀ #k. (CompromisePartie( B, A ) @ #k) ⇒ ¬(#l < #k))))"
+*/
+induction
+  case empty_trace
+  by contradiction
+next
+  case non_empty_trace
+  simplify
+  solve( (∃ A B rk rk2 tid tid2 #i #j #l.
+           (StartChainRk( tid, A, B, rk ) @ #i) ∧
+           (!KU( rk ) @ #j) ∧
+           (Heal( tid2, B, rk2 ) @ #l) ∧
+           (Heal( tid, A, rk2 ) @ #l)
+          ∧
+           (((#l < #i) ∨ (#l = #i))) ∧
+           (∀ #k. (CompromisePartie( A, B ) @ #k) ⇒ ¬(#l < #k)) ∧
+           (∀ #k. (CompromisePartie( B, A ) @ #k) ⇒ ¬(#l < #k)))  ∥
+         (∃ A B rk sck rk2 tid tid2 #i #j #l.
+           (GlobalSendChainKey( tid, A, B, rk, sck ) @ #i) ∧
+           (!KU( sck ) @ #j) ∧
+           (Heal( tid2, B, rk2 ) @ #l) ∧
+           (Heal( tid, A, rk2 ) @ #l)
+          ∧
+           (((#l < #i) ∨ (#l = #i))) ∧
+           (∀ #k. (CompromisePartie( A, B ) @ #k) ⇒ ¬(#l < #k)) ∧
+           (∀ #k. (CompromisePartie( B, A ) @ #k) ⇒ ¬(#l < #k)))  ∥
+         (∃ A B rk rk2 sck tid tid2 #i #j #l #r.
+           (ReceiverChain( tid, A, B, rk, sck ) @ #i) ∧
+           (!KU( sck ) @ #j) ∧
+           (Heal( tid2, B, rk2 ) @ #l) ∧
+           (Heal( tid, A, rk2 ) @ #l) ∧
+           (StartChainRk( tid, A, B, rk ) @ #r)
+          ∧
+           (((#l < #r) ∨ (#l = #r))) ∧
+           (∀ #k. (CompromisePartie( A, B ) @ #k) ⇒ ¬(#l < #k)) ∧
+           (∀ #k. (CompromisePartie( B, A ) @ #k) ⇒ ¬(#l < #k))) )
+    case case_1
+    solve( StartChainRk( tid, A, B, rk ) @ #i )
+      case InitKeyExchange_case_1
+      solve( Heal( tid2, B, rk2 ) @ #l )
+        case SendReceiveAsymetric_case_1
+        solve( Heal( ~tidA, A, ~rk.1 ) @ #l )
+          case SendReceiveAsymetric_case_1
+          by contradiction
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction
+        qed
+      next
+        case SendReceiveAsymetric_case_2
+        by solve( !KU( ~rk ) @ #j )
+      qed
+    next
+      case InitKeyExchange_case_2
+      by solve( !KU( ~rk ) @ #j )
+    next
+      case SendReceiveAsymetric_ReceiveToSend
+      solve( Heal( tid2, B, rk2 ) @ #l )
+        case SendReceiveAsymetric_case_1
+        solve( Heal( ~tidB, A, ~rk.1 ) @ #l )
+          case SendReceiveAsymetric_case_1
+          by contradiction
+        next
+          case SendReceiveAsymetric_case_2
+          solve( !ReceivingChainKey( ~tidB, ~rk, A, B, rck ) ▶₁ #i )
+            case InitKeyExchange_case_1
+            by contradiction
+          next
+            case InitKeyExchange_case_2
+            by contradiction
+          next
+            case ReceiveSymetric
+            solve( !KU( h(rck) ) @ #vk )
+              case CompromiseReceiving_case_1
+              by contradiction
+            next
+              case CompromiseReceiving_case_2
+              solve( StartChainRk( ~tidB, A, B, ~rk ) @ #j )
+                case InitKeyExchange_case_1
+                by contradiction
+              next
+                case InitKeyExchange_case_2
+                by contradiction
+              next
+                case SendReceiveAsymetric_ReceiveToSend
+                by contradiction
+              next
+                case SendReceiveAsymetric_SendToReceive
+                by contradiction
+              next
+                case SendReceiveAsymetric_case_1
+                by contradiction
+              next
+                case SendReceiveAsymetric_case_2
+                by contradiction
+              qed
+            next
+              case CompromiseSender
+              solve( SendingChainKey( ~rk.2, ~tidA.1, A.1, B.1, h(rck)
+                     ) ▶₀ #vr.1 )
+                case CompromiseSender
+                by contradiction
+              next
+                case SendSymetric
+                solve( StartChainRk( ~tidB, A, B, ~rk ) @ #j )
+                  case InitKeyExchange_case_1
+                  by contradiction
+                next
+                  case InitKeyExchange_case_2
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_ReceiveToSend
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_SendToReceive
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_1
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_2
+                  by contradiction
+                qed
+              qed
+            next
+              case c_h
+              solve( ((((#l = #j) ∨ (#j < #l))) ∧ (¬(#l = #j)))  ∥
+                     (∃ #k.
+                       (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                     (∃ #k.
+                       (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                case case_1
+                solve( (#j = #l)  ∥ (#l < #j) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                qed
+              next
+                case case_2
+                by contradiction
+              next
+                case case_3
+                by contradiction
+              qed
+            qed
+          next
+            case ReceiveSymetricSkip
+            solve( !KU( h(rck) ) @ #vk )
+              case CompromiseReceiving_case_1
+              solve( StartChainRk( ~tidB, A, B, ~rk ) @ #j )
+                case InitKeyExchange_case_1
+                by contradiction
+              next
+                case InitKeyExchange_case_2
+                by contradiction
+              next
+                case SendReceiveAsymetric_ReceiveToSend
+                by contradiction
+              next
+                case SendReceiveAsymetric_SendToReceive
+                by contradiction
+              next
+                case SendReceiveAsymetric_case_1
+                by contradiction
+              next
+                case SendReceiveAsymetric_case_2
+                by contradiction
+              qed
+            next
+              case CompromiseReceiving_case_2
+              by contradiction
+            next
+              case CompromiseSender
+              solve( SendingChainKey( ~rk.2, ~tidA.1, A.1, B.1, h(rck)
+                     ) ▶₀ #vr.1 )
+                case CompromiseSender
+                by contradiction
+              next
+                case SendSymetric
+                solve( StartChainRk( ~tidB, A, B, ~rk ) @ #j )
+                  case InitKeyExchange_case_1
+                  by contradiction
+                next
+                  case InitKeyExchange_case_2
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_ReceiveToSend
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_SendToReceive
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_1
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_2
+                  by contradiction
+                qed
+              qed
+            next
+              case c_h
+              solve( ((((#l = #j) ∨ (#j < #l))) ∧ (¬(#l = #j)))  ∥
+                     (∃ #k.
+                       (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                     (∃ #k.
+                       (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                case case_1
+                solve( (#j = #l)  ∥ (#l < #j) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                qed
+              next
+                case case_2
+                by contradiction
+              next
+                case case_3
+                by contradiction
+              qed
+            qed
+          next
+            case SendReceiveAsymetric
+            solve( !KU( h(~rk) ) @ #vk )
+              case CompromiseReceiving
+              by contradiction
+            next
+              case CompromiseSender
+              solve( ~rk.3 ⊏ h(~rk) )
+                case SubtermSplit1
+                by contradiction
+              next
+                case SubtermSplit2
+                solve( StartChainRk( ~tidA.1, A.1, B.1, ~rk ) @ #j )
+                  case SendReceiveAsymetric_case_1
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_2
+                  by contradiction
+                qed
+              qed
+            next
+              case c_h
+              solve( ((((#l = #vr) ∨ (#vr < #l))) ∧ (¬(#l = #vr)))  ∥
+                     (∃ #k.
+                       (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                     (∃ #k.
+                       (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                case case_1
+                solve( (#l = #vr)  ∥ (#vr < #l) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                qed
+              next
+                case case_2
+                by contradiction
+              next
+                case case_3
+                by contradiction
+              qed
+            qed
+          next
+            case SendReceiveAsymetric_SendToReceive
+            solve( !KU( h(~rk) ) @ #vk )
+              case CompromiseReceiving
+              by contradiction
+            next
+              case CompromiseSender
+              solve( ~rk.3 ⊏ h(~rk) )
+                case SubtermSplit1
+                by contradiction
+              next
+                case SubtermSplit2
+                solve( StartChainRk( ~tidA.1, A.1, B.1, ~rk ) @ #j )
+                  case SendReceiveAsymetric_SendToReceive
+                  by contradiction
+                qed
+              qed
+            next
+              case c_h
+              solve( (∃ #k.
+                       (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                     (∃ #k.
+                       (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                case case_1
+                by contradiction
+              next
+                case case_2
+                by contradiction
+              qed
+            qed
+          qed
+        qed
+      next
+        case SendReceiveAsymetric_case_2
+        solve( Heal( ~tidB, A, ~rk.1 ) @ #l )
+          case SendReceiveAsymetric_case_1
+          solve( !ReceivingChainKey( ~tidA, ~rk, A, B, rck ) ▶₁ #i )
+            case InitKeyExchange_case_1
+            by contradiction
+          next
+            case InitKeyExchange_case_2
+            by contradiction
+          next
+            case ReceiveSymetric
+            solve( !KU( h(rck) ) @ #vk )
+              case CompromiseReceiving_case_1
+              by contradiction
+            next
+              case CompromiseReceiving_case_2
+              solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j )
+                case InitKeyExchange_case_1
+                by contradiction
+              next
+                case InitKeyExchange_case_2
+                by contradiction
+              next
+                case SendReceiveAsymetric_ReceiveToSend
+                by contradiction
+              next
+                case SendReceiveAsymetric_SendToReceive
+                by contradiction
+              next
+                case SendReceiveAsymetric_case_1
+                by contradiction
+              next
+                case SendReceiveAsymetric_case_2
+                by contradiction
+              qed
+            next
+              case CompromiseSender
+              solve( SendingChainKey( ~rk.2, ~tidA.1, A.1, B.1, h(rck)
+                     ) ▶₀ #vr.1 )
+                case CompromiseSender
+                by contradiction
+              next
+                case SendSymetric
+                solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j )
+                  case InitKeyExchange_case_1
+                  by contradiction
+                next
+                  case InitKeyExchange_case_2
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_ReceiveToSend
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_SendToReceive
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_1
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_2
+                  by contradiction
+                qed
+              qed
+            next
+              case c_h
+              solve( ((((#l = #j) ∨ (#j < #l))) ∧ (¬(#l = #j)))  ∥
+                     (∃ #k.
+                       (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                     (∃ #k.
+                       (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                case case_1
+                solve( (#j = #l)  ∥ (#l < #j) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                qed
+              next
+                case case_2
+                by contradiction
+              next
+                case case_3
+                by contradiction
+              qed
+            qed
+          next
+            case ReceiveSymetricSkip
+            solve( !KU( h(rck) ) @ #vk )
+              case CompromiseReceiving_case_1
+              solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j )
+                case InitKeyExchange_case_1
+                by contradiction
+              next
+                case InitKeyExchange_case_2
+                by contradiction
+              next
+                case SendReceiveAsymetric_ReceiveToSend
+                by contradiction
+              next
+                case SendReceiveAsymetric_SendToReceive
+                by contradiction
+              next
+                case SendReceiveAsymetric_case_1
+                by contradiction
+              next
+                case SendReceiveAsymetric_case_2
+                by contradiction
+              qed
+            next
+              case CompromiseReceiving_case_2
+              by contradiction
+            next
+              case CompromiseSender
+              solve( SendingChainKey( ~rk.2, ~tidA.1, A.1, B.1, h(rck)
+                     ) ▶₀ #vr.1 )
+                case CompromiseSender
+                by contradiction
+              next
+                case SendSymetric
+                solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j )
+                  case InitKeyExchange_case_1
+                  by contradiction
+                next
+                  case InitKeyExchange_case_2
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_ReceiveToSend
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_SendToReceive
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_1
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_2
+                  by contradiction
+                qed
+              qed
+            next
+              case c_h
+              solve( ((((#l = #j) ∨ (#j < #l))) ∧ (¬(#l = #j)))  ∥
+                     (∃ #k.
+                       (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                     (∃ #k.
+                       (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                case case_1
+                solve( (#j = #l)  ∥ (#l < #j) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                qed
+              next
+                case case_2
+                by contradiction
+              next
+                case case_3
+                by contradiction
+              qed
+            qed
+          next
+            case SendReceiveAsymetric
+            solve( !KU( h(~rk) ) @ #vk )
+              case CompromiseReceiving
+              by contradiction
+            next
+              case CompromiseSender
+              solve( ~rk.3 ⊏ h(~rk) )
+                case SubtermSplit1
+                by contradiction
+              next
+                case SubtermSplit2
+                solve( StartChainRk( ~tidA.1, A.1, B.1, ~rk ) @ #j )
+                  case SendReceiveAsymetric_case_1
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_2
+                  by contradiction
+                qed
+              qed
+            next
+              case c_h
+              solve( ((((#l = #vr) ∨ (#vr < #l))) ∧ (¬(#l = #vr)))  ∥
+                     (∃ #k.
+                       (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                     (∃ #k.
+                       (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                case case_1
+                solve( (#l = #vr)  ∥ (#vr < #l) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                qed
+              next
+                case case_2
+                by contradiction
+              next
+                case case_3
+                by contradiction
+              qed
+            qed
+          next
+            case SendReceiveAsymetric_SendToReceive
+            solve( !KU( h(~rk) ) @ #vk )
+              case CompromiseReceiving
+              by contradiction
+            next
+              case CompromiseSender
+              solve( ~rk.3 ⊏ h(~rk) )
+                case SubtermSplit1
+                by contradiction
+              next
+                case SubtermSplit2
+                solve( StartChainRk( ~tidA.1, A.1, B.1, ~rk ) @ #j )
+                  case SendReceiveAsymetric_SendToReceive
+                  by contradiction
+                qed
+              qed
+            next
+              case c_h
+              solve( (∃ #k.
+                       (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                     (∃ #k.
+                       (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                case case_1
+                by contradiction
+              next
+                case case_2
+                by contradiction
+              qed
+            qed
+          qed
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction
+        qed
+      qed
+    next
+      case SendReceiveAsymetric_SendToReceive
+      solve( Heal( tid2, B, rk2 ) @ #l )
+        case SendReceiveAsymetric_case_1
+        solve( Heal( ~tidA, A, ~rk.1 ) @ #l )
+          case SendReceiveAsymetric_case_1
+          by contradiction
+        next
+          case SendReceiveAsymetric_case_2
+          solve( SendingChainKey( ~rk, ~tidA, A, B, sck ) ▶₀ #i )
+            case CompromiseSender
+            by contradiction
+          next
+            case InitKeyExchange_case_1
+            by contradiction
+          next
+            case InitKeyExchange_case_2
+            by contradiction
+          next
+            case SendReceiveAsymetric
+            solve( BookKeppingRootKeys( ~tidA, A, ~rk ) ▶₂ #i )
+              case SendReceiveAsymetric_case_1
+              by contradiction
+            next
+              case SendReceiveAsymetric_case_2
+              solve( !KU( ~new_rk ) @ #j )
+                case SendReceiveAsymetric_SendToReceive
+                solve( !KU( h(~rk) ) @ #vk )
+                  case CompromiseReceiving
+                  by contradiction
+                next
+                  case CompromiseSender
+                  solve( ~rk.3 ⊏ h(~rk) )
+                    case SubtermSplit1
+                    by contradiction
+                  next
+                    case SubtermSplit2
+                    by contradiction
+                  qed
+                next
+                  case c_h
+                  by solve( !KU( ~rk ) @ #vk.1 )
+                qed
+              qed
+            qed
+          next
+            case SendReceiveAsymetric_ReceiveToSend_case_1
+            by contradiction
+          next
+            case SendReceiveAsymetric_ReceiveToSend_case_2
+            by contradiction
+          next
+            case SendReceiveAsymetric_ReceiveToSend_case_3
+            solve( (#vr.1 = #l)  ∥ (#l < #vr.1) )
+              case case_1
+              by contradiction
+            next
+              case case_2
+              solve( !KU( h(~rk) ) @ #vk )
+                case CompromiseSender
+                solve( ~rk.4 ⊏ h(~rk) )
+                  case SubtermSplit1
+                  by contradiction
+                next
+                  case SubtermSplit2
+                  by contradiction
+                qed
+              next
+                case c_h
+                solve( (∃ #k.
+                         (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                       (∃ #k.
+                         (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                qed
+              qed
+            qed
+          next
+            case SendReceiveAsymetric_ReceiveToSend_case_4
+            solve( !KU( h(~rk) ) @ #vk )
+              case CompromiseSender
+              solve( ~rk.4 ⊏ h(~rk) )
+                case SubtermSplit1
+                by contradiction
+              next
+                case SubtermSplit2
+                by contradiction
+              qed
+            next
+              case c_h
+              solve( (∃ #k.
+                       (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                     (∃ #k.
+                       (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                case case_1
+                by contradiction
+              next
+                case case_2
+                by contradiction
+              qed
+            qed
+          next
+            case SendReceiveAsymetric_ReceiveToSend_case_5
+            solve( !KU( h(~rk) ) @ #vk )
+              case CompromiseSender
+              solve( ~rk.3 ⊏ h(~rk) )
+                case SubtermSplit1
+                by contradiction
+              next
+                case SubtermSplit2
+                by contradiction
+              qed
+            next
+              case c_h
+              solve( (∃ #k.
+                       (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                     (∃ #k.
+                       (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                case case_1
+                by contradiction
+              next
+                case case_2
+                by contradiction
+              qed
+            qed
+          next
+            case SendReceiveAsymetric_ReceiveToSend_case_6
+            solve( !KU( h(~rk) ) @ #vk )
+              case CompromiseSender
+              solve( ~rk.3 ⊏ h(~rk) )
+                case SubtermSplit1
+                by contradiction
+              next
+                case SubtermSplit2
+                by contradiction
+              qed
+            next
+              case c_h
+              solve( (∃ #k.
+                       (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                     (∃ #k.
+                       (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                case case_1
+                by contradiction
+              next
+                case case_2
+                by contradiction
+              qed
+            qed
+          next
+            case SendSymetric
+            solve( BookKeppingRootKeys( ~tidA, A, ~rk ) ▶₂ #i )
+              case InitKeyExchange_case_1
+              by contradiction
+            next
+              case InitKeyExchange_case_2
+              by contradiction
+            next
+              case InitKeyExchange_case_3
+              by contradiction
+            next
+              case InitKeyExchange_case_4
+              by contradiction
+            next
+              case SendReceiveAsymetric_ReceiveToSend_case_1
+              solve( !KU( h(~rk.2) ) @ #vk.1 )
+                case CompromiseReceiving
+                solve( (#j = #l)  ∥ (#l < #j) )
+                  case case_1
+                  by solve( StartChainRk( ~tidA, $id, B, ~rk ) @ #j )
+                next
+                  case case_2
+                  solve( StartChainRk( ~tidA, $id, B, ~rk ) @ #j )
+                    case SendReceiveAsymetric_ReceiveToSend
+                    by contradiction
+                  qed
+                qed
+              next
+                case CompromiseSender
+                solve( ~rk.3 ⊏ h(~rk.2) )
+                  case SubtermSplit1
+                  by contradiction
+                next
+                  case SubtermSplit2
+                  solve( StartChainRk( ~tidA, $id, B, ~rk ) @ #j )
+                    case SendReceiveAsymetric_ReceiveToSend
+                    by contradiction
+                  qed
+                qed
+              next
+                case c_h
+                by solve( !KU( ~rk.2 ) @ #vk.2 )
+              qed
+            next
+              case SendReceiveAsymetric_ReceiveToSend_case_2
+              solve( StartChainRk( ~tidA, $id, B, ~rk ) @ #j )
+                case SendReceiveAsymetric_ReceiveToSend
+                by contradiction
+              qed
+            next
+              case SendReceiveAsymetric_ReceiveToSend_case_3
+              solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j )
+                case SendReceiveAsymetric_ReceiveToSend
+                solve( (#vr.1 = #l)  ∥ (#l < #vr.1) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  solve( !KU( ~new_rk ) @ #j.1 )
+                    case SendReceiveAsymetric_SendToReceive
+                    solve( !KU( h(~rk.1) ) @ #vk.1 )
+                      case CompromiseReceiving
+                      by contradiction
+                    next
+                      case CompromiseSender
+                      solve( ~rk.4 ⊏ h(~rk.1) )
+                        case SubtermSplit1
+                        by contradiction
+                      next
+                        case SubtermSplit2
+                        solve( StartChainRk( ~tidA.2, A.1, B.1, ~rk.1 ) @ #j.2 )
+                          case SendReceiveAsymetric_case_1
+                          by contradiction
+                        next
+                          case SendReceiveAsymetric_case_2
+                          by contradiction
+                        qed
+                      qed
+                    next
+                      case c_h
+                      solve( (∃ #k.
+                               (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                             (∃ #k.
+                               (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                        case case_1
+                        by contradiction
+                      next
+                        case case_2
+                        by contradiction
+                      qed
+                    qed
+                  qed
+                qed
+              qed
+            next
+              case SendReceiveAsymetric_ReceiveToSend_case_4
+              solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j )
+                case SendReceiveAsymetric_ReceiveToSend
+                solve( !KU( h(~rk.1) ) @ #vk.1 )
+                  case CompromiseReceiving
+                  by contradiction
+                next
+                  case CompromiseSender
+                  solve( ~rk.4 ⊏ h(~rk.1) )
+                    case SubtermSplit1
+                    by contradiction
+                  next
+                    case SubtermSplit2
+                    solve( StartChainRk( ~tidA.2, A.1, B.1, ~rk.1 ) @ #j.1 )
+                      case SendReceiveAsymetric_SendToReceive
+                      by contradiction
+                    qed
+                  qed
+                next
+                  case c_h
+                  solve( (∃ #k.
+                           (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                         (∃ #k.
+                           (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                    case case_1
+                    by contradiction
+                  next
+                    case case_2
+                    by contradiction
+                  qed
+                qed
+              qed
+            next
+              case SendReceiveAsymetric_ReceiveToSend_case_5
+              solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j )
+                case SendReceiveAsymetric_ReceiveToSend
+                solve( (#j.1 = #l)  ∥ (#l < #j.1) )
+                  case case_1
+                  solve( StartChainRk( ~tidA, A, B, ~rk.1 ) @ #l )
+                    case SendReceiveAsymetric_case_1
+                    by contradiction
+                  next
+                    case SendReceiveAsymetric_case_2
+                    solve( !KU( ~new_rk ) @ #j.1 )
+                      case SendReceiveAsymetric_SendToReceive
+                      solve( !KU( h(sck) ) @ #vk )
+                        case CompromiseReceiving_case_1
+                        by contradiction
+                      next
+                        case CompromiseReceiving_case_2
+                        by contradiction
+                      next
+                        case CompromiseSender
+                        solve( SendingChainKey( ~rk.2, ~tidA.2, A.1, B.1, h(sck)
+                               ) ▶₀ #vr.2 )
+                          case CompromiseSender
+                          by contradiction
+                        next
+                          case SendSymetric
+                          by contradiction
+                        qed
+                      next
+                        case c_h
+                        solve( (∃ #k.
+                                 (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                               (∃ #k.
+                                 (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                          case case_1
+                          by contradiction
+                        next
+                          case case_2
+                          by contradiction
+                        qed
+                      qed
+                    qed
+                  qed
+                next
+                  case case_2
+                  solve( !KU( h(sck) ) @ #vk )
+                    case CompromiseReceiving_case_1
+                    by contradiction
+                  next
+                    case CompromiseReceiving_case_2
+                    by contradiction
+                  next
+                    case CompromiseSender
+                    solve( SendingChainKey( ~rk.3, ~tidA.2, A.1, B.1, h(sck)
+                           ) ▶₀ #vr.2 )
+                      case CompromiseSender
+                      by contradiction
+                    next
+                      case SendSymetric
+                      by contradiction
+                    qed
+                  next
+                    case c_h
+                    solve( (∃ #k.
+                             (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                           (∃ #k.
+                             (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                      case case_1
+                      by contradiction
+                    next
+                      case case_2
+                      by contradiction
+                    qed
+                  qed
+                qed
+              qed
+            next
+              case SendReceiveAsymetric_ReceiveToSend_case_6
+              solve( !KU( h(sck) ) @ #vk )
+                case CompromiseReceiving_case_1
+                by contradiction
+              next
+                case CompromiseReceiving_case_2
+                by contradiction
+              next
+                case CompromiseSender
+                solve( SendingChainKey( ~rk.3, ~tidA.2, A.2, B.1, h(sck)
+                       ) ▶₀ #vr.3 )
+                  case CompromiseSender
+                  by contradiction
+                next
+                  case SendSymetric
+                  by contradiction
+                qed
+              next
+                case c_h
+                solve( (∃ #k.
+                         (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                       (∃ #k.
+                         (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                  case case_1
+                  by contradiction /* from formulas */
+                next
+                  case case_2
+                  by contradiction /* from formulas */
+                qed
+              qed
+            next
+              case SendReceiveAsymetric_SendToReceive
+              solve( !KU( ~new_rk ) @ #j.1 )
+                case SendReceiveAsymetric_SendToReceive
+                solve( !KU( h(sck) ) @ #vk )
+                  case CompromiseReceiving_case_1
+                  by contradiction
+                next
+                  case CompromiseReceiving_case_2
+                  by contradiction
+                next
+                  case CompromiseSender
+                  solve( SendingChainKey( ~rk.3, ~tidA.2, A.1, B.2, h(sck)
+                         ) ▶₀ #vr.2 )
+                    case CompromiseSender
+                    by contradiction
+                  next
+                    case SendSymetric
+                    by contradiction
+                  qed
+                next
+                  case c_h
+                  solve( (∃ #k.
+                           (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                         (∃ #k.
+                           (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                    case case_1
+                    by contradiction /* from formulas */
+                  next
+                    case case_2
+                    by contradiction /* from formulas */
+                  qed
+                qed
+              qed
+            next
+              case SendReceiveAsymetric_case_1
+              solve( !KU( ~new_rk ) @ #j.1 )
+                case SendReceiveAsymetric_SendToReceive
+                solve( !KU( h(sck) ) @ #vk )
+                  case CompromiseReceiving_case_1
+                  by contradiction
+                next
+                  case CompromiseReceiving_case_2
+                  by contradiction
+                next
+                  case CompromiseSender
+                  solve( SendingChainKey( ~rk.3, ~tidA.2, A.1, B.2, h(sck)
+                         ) ▶₀ #vr.2 )
+                    case CompromiseSender
+                    by contradiction
+                  next
+                    case SendSymetric
+                    by contradiction
+                  qed
+                next
+                  case c_h
+                  solve( (#vr < #l)  ∥
+                         (∃ #k.
+                           (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                         (∃ #k.
+                           (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                    case case_1
+                    by contradiction
+                  next
+                    case case_2
+                    by contradiction
+                  next
+                    case case_3
+                    by contradiction
+                  qed
+                qed
+              qed
+            next
+              case SendReceiveAsymetric_case_2
+              solve( !KU( h(sck) ) @ #vk )
+                case CompromiseReceiving_case_1
+                by contradiction
+              next
+                case CompromiseReceiving_case_2
+                by contradiction
+              next
+                case CompromiseSender
+                solve( SendingChainKey( ~rk.3, ~tidA.3, A.2, B.1, h(sck)
+                       ) ▶₀ #vr.2 )
+                  case CompromiseSender
+                  by contradiction
+                next
+                  case SendSymetric
+                  by contradiction
+                qed
+              next
+                case c_h
+                solve( (#vr < #l)  ∥
+                       (∃ #k.
+                         (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                       (∃ #k.
+                         (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                next
+                  case case_3
+                  by contradiction
+                qed
+              qed
+            qed
+          qed
+        qed
+      next
+        case SendReceiveAsymetric_case_2
+        solve( Heal( ~tidA, A, ~rk.1 ) @ #l )
+          case SendReceiveAsymetric_case_1
+          solve( !KU( ~new_rk ) @ #j )
+            case SendReceiveAsymetric_SendToReceive
+            solve( SendingChainKey( ~rk, ~tidA, A, B, sck ) ▶₀ #i )
+              case CompromiseSender
+              by contradiction
+            next
+              case InitKeyExchange_case_1
+              by contradiction
+            next
+              case InitKeyExchange_case_2
+              by contradiction
+            next
+              case SendReceiveAsymetric
+              solve( !KU( h(~rk) ) @ #vk )
+                case CompromiseReceiving
+                by contradiction
+              next
+                case CompromiseSender
+                solve( ~rk.3 ⊏ h(~rk) )
+                  case SubtermSplit1
+                  by contradiction
+                next
+                  case SubtermSplit2
+                  by contradiction
+                qed
+              next
+                case c_h
+                by solve( !KU( ~rk ) @ #vk.1 )
+              qed
+            next
+              case SendReceiveAsymetric_ReceiveToSend_case_1
+              by contradiction
+            next
+              case SendReceiveAsymetric_ReceiveToSend_case_2
+              by contradiction
+            next
+              case SendReceiveAsymetric_ReceiveToSend_case_3
+              solve( !KU( h(~rk) ) @ #vk )
+                case CompromiseSender
+                solve( ~rk.4 ⊏ h(~rk) )
+                  case SubtermSplit1
+                  by contradiction
+                next
+                  case SubtermSplit2
+                  by contradiction
+                qed
+              next
+                case c_h
+                solve( !KU( ~rk ) @ #vk.2 )
+                  case SendReceiveAsymetric_ReceiveToSend
+                  solve( (#vr.1 = #l)  ∥ (#l < #vr.1) )
+                    case case_1
+                    solve( (∃ #k.
+                             (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                           (∃ #k.
+                             (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                      case case_1
+                      by contradiction
+                    next
+                      case case_2
+                      by contradiction
+                    qed
+                  next
+                    case case_2
+                    solve( (∃ #k.
+                             (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#vr.1 < #k))  ∥
+                           (∃ #k.
+                             (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#vr.1 < #k)) )
+                      case case_1
+                      by contradiction
+                    next
+                      case case_2
+                      by contradiction
+                    qed
+                  qed
+                qed
+              qed
+            next
+              case SendReceiveAsymetric_ReceiveToSend_case_4
+              solve( !KU( h(~rk) ) @ #vk )
+                case CompromiseSender
+                solve( ~rk.4 ⊏ h(~rk) )
+                  case SubtermSplit1
+                  by contradiction
+                next
+                  case SubtermSplit2
+                  by contradiction
+                qed
+              next
+                case c_h
+                solve( (∃ #k.
+                         (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                       (∃ #k.
+                         (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                qed
+              qed
+            next
+              case SendReceiveAsymetric_ReceiveToSend_case_5
+              solve( !KU( h(~rk) ) @ #vk )
+                case CompromiseSender
+                solve( ~rk.3 ⊏ h(~rk) )
+                  case SubtermSplit1
+                  by contradiction
+                next
+                  case SubtermSplit2
+                  by contradiction
+                qed
+              next
+                case c_h
+                solve( (∃ #k.
+                         (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                       (∃ #k.
+                         (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                qed
+              qed
+            next
+              case SendReceiveAsymetric_ReceiveToSend_case_6
+              solve( !KU( h(~rk) ) @ #vk )
+                case CompromiseSender
+                solve( ~rk.3 ⊏ h(~rk) )
+                  case SubtermSplit1
+                  by contradiction
+                next
+                  case SubtermSplit2
+                  by contradiction
+                qed
+              next
+                case c_h
+                solve( (∃ #k.
+                         (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                       (∃ #k.
+                         (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                qed
+              qed
+            next
+              case SendSymetric
+              solve( !KU( h(sck) ) @ #vk )
+                case CompromiseReceiving_case_1
+                solve( StartChainRk( ~tidB.1, B, A, ~rk ) @ #j.2 )
+                  case InitKeyExchange_case_1
+                  solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j.2 )
+                    case InitKeyExchange_case_1
+                    by contradiction
+                  next
+                    case InitKeyExchange_case_2
+                    by contradiction
+                  qed
+                next
+                  case InitKeyExchange_case_2
+                  solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j.2 )
+                    case InitKeyExchange_case_1
+                    by contradiction
+                  next
+                    case InitKeyExchange_case_2
+                    by contradiction
+                  qed
+                next
+                  case SendReceiveAsymetric_ReceiveToSend
+                  solve( (#j.2 = #l)  ∥ (#l < #j.2) )
+                    case case_1
+                    by solve( StartChainRk( ~tidA, A, B, ~rk ) @ #l )
+                  next
+                    case case_2
+                    solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j.2 )
+                      case SendReceiveAsymetric_ReceiveToSend
+                      by contradiction
+                    qed
+                  qed
+                next
+                  case SendReceiveAsymetric_SendToReceive
+                  solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j.2 )
+                    case SendReceiveAsymetric_SendToReceive
+                    by contradiction
+                  qed
+                next
+                  case SendReceiveAsymetric_case_1
+                  solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j.2 )
+                    case SendReceiveAsymetric_case_1
+                    by contradiction
+                  next
+                    case SendReceiveAsymetric_case_2
+                    by contradiction
+                  qed
+                next
+                  case SendReceiveAsymetric_case_2
+                  solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j.2 )
+                    case SendReceiveAsymetric_case_1
+                    by contradiction
+                  next
+                    case SendReceiveAsymetric_case_2
+                    by contradiction
+                  qed
+                qed
+              next
+                case CompromiseReceiving_case_2
+                solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j.1 )
+                  case InitKeyExchange_case_1
+                  by contradiction
+                next
+                  case InitKeyExchange_case_2
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_ReceiveToSend
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_SendToReceive
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_1
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_2
+                  by contradiction
+                qed
+              next
+                case CompromiseSender
+                solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j.1 )
+                  case InitKeyExchange_case_1
+                  by contradiction
+                next
+                  case InitKeyExchange_case_2
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_ReceiveToSend
+                  solve( SendingChainKey( ~rk.3, ~tidA.1, A.1, B.1, h(sck)
+                         ) ▶₀ #vr.1 )
+                    case CompromiseSender
+                    by contradiction
+                  next
+                    case SendSymetric
+                    by contradiction
+                  qed
+                next
+                  case SendReceiveAsymetric_SendToReceive
+                  solve( BookKeppingRootKeys( ~tidA, A, ~rk ) ▶₂ #i )
+                    case SendReceiveAsymetric_SendToReceive
+                    solve( SendingChainKey( ~rk.3, ~tidA.1, A.1, B.1, h(sck)
+                           ) ▶₀ #vr.1 )
+                      case CompromiseSender
+                      by contradiction
+                    next
+                      case SendSymetric
+                      by contradiction
+                    qed
+                  qed
+                next
+                  case SendReceiveAsymetric_case_1
+                  solve( SendingChainKey( ~rk.3, ~tidA.1, A.1, B.1, h(sck)
+                         ) ▶₀ #vr.1 )
+                    case CompromiseSender
+                    by contradiction
+                  next
+                    case SendSymetric
+                    by contradiction
+                  qed
+                next
+                  case SendReceiveAsymetric_case_2
+                  solve( SendingChainKey( ~rk.3, ~tidA.2, A.1, B.1, h(sck)
+                         ) ▶₀ #vr.1 )
+                    case CompromiseSender
+                    by contradiction
+                  next
+                    case SendSymetric
+                    by contradiction
+                  qed
+                qed
+              next
+                case c_h
+                solve( (#vr < #l)  ∥
+                       (∃ #k.
+                         (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                       (∃ #k.
+                         (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                next
+                  case case_3
+                  by contradiction
+                qed
+              qed
+            qed
+          qed
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction
+        qed
+      qed
+    next
+      case SendReceiveAsymetric_case_1
+      solve( Heal( tid2, B, rk2 ) @ #l )
+        case SendReceiveAsymetric_case_1
+        solve( Heal( ~tidA, A, ~rk.1 ) @ #l )
+          case SendReceiveAsymetric_case_1
+          by contradiction
+        next
+          case SendReceiveAsymetric_case_2
+          by solve( !KU( ~new_rk ) @ #j )
+        qed
+      next
+        case SendReceiveAsymetric_case_2
+        solve( Heal( ~tidA, A, ~rk.1 ) @ #l )
+          case SendReceiveAsymetric_case_1
+          by solve( !KU( ~new_rk ) @ #j )
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction
+        qed
+      qed
+    next
+      case SendReceiveAsymetric_case_2
+      solve( Heal( tid2, B, rk2 ) @ #l )
+        case SendReceiveAsymetric_case_1
+        solve( Heal( ~tidB, A, ~rk.1 ) @ #l )
+          case SendReceiveAsymetric_case_1
+          by contradiction
+        next
+          case SendReceiveAsymetric_case_2
+          by solve( !KU( ~new_rk ) @ #j )
+        qed
+      next
+        case SendReceiveAsymetric_case_2
+        solve( Heal( ~tidB, A, ~rk.1 ) @ #l )
+          case SendReceiveAsymetric_case_1
+          by solve( !KU( ~new_rk ) @ #j )
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction
+        qed
+      qed
+    qed
+  next
+    case case_2
+    solve( Heal( tid2, B, rk2 ) @ #l )
+      case SendReceiveAsymetric_case_1
+      solve( Heal( tid, A, ~rk ) @ #l )
+        case SendReceiveAsymetric_case_1
+        by contradiction
+      next
+        case SendReceiveAsymetric_case_2
+        solve( (sck = h(rk.1))  ∥
+               (∃ pck #j.
+                 (sck = h(pck)) ∧
+                 (GlobalSendChainKey( ~tidB, A, B, rk.1, pck ) @ #j)
+                ∧
+                 #j < #i) )
+          case case_1
+          solve( StartChainRk( ~tidB, A, B, rk.1 ) @ #j )
+            case InitKeyExchange_case_1
+            solve( GlobalSendChainKey( ~tidB, A, B, ~rk, h(~rk) ) @ #i )
+              case CompromiseSender
+              by contradiction
+            next
+              case SendSymetric
+              by contradiction
+            qed
+          next
+            case InitKeyExchange_case_2
+            solve( GlobalSendChainKey( ~tidB, A, B, ~rk, h(~rk) ) @ #i )
+              case CompromiseSender
+              by contradiction
+            next
+              case SendSymetric
+              by contradiction
+            qed
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            solve( !KU( h(~new_rk) ) @ #j.1 )
+              case CompromiseSender
+              solve( (#l = #i)  ∥ (#i < #l) )
+                case case_1
+                by solve( GlobalSendChainKey( ~tidB, A, B, ~new_rk.1, h(~new_rk.1)
+                          ) @ #i )
+              next
+                case case_2
+                by contradiction
+              qed
+            next
+              case c_h
+              solve( (#l < #i)  ∥ (#l = #i) )
+                case case_1
+                solve( (∃ #k.
+                         (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                       (∃ #k.
+                         (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                qed
+              next
+                case case_2
+                by solve( GlobalSendChainKey( ~tidB, A, B, ~new_rk.1, h(~new_rk.1)
+                          ) @ #i )
+              qed
+            qed
+          next
+            case SendReceiveAsymetric_SendToReceive
+            solve( GlobalSendChainKey( ~tidB, A, B, ~new_rk, h(~new_rk)
+                   ) @ #i )
+              case CompromiseSender
+              by contradiction
+            next
+              case SendSymetric
+              solve( !KU( h(~new_rk) ) @ #j.1 )
+                case CompromiseReceiving
+                by contradiction
+              next
+                case CompromiseSender
+                by contradiction
+              next
+                case c_h
+                solve( !KU( ~new_rk ) @ #vk.1 )
+                  case SendReceiveAsymetric_SendToReceive
+                  solve( (∃ #k.
+                           (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                         (∃ #k.
+                           (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                    case case_1
+                    by contradiction
+                  next
+                    case case_2
+                    by contradiction
+                  qed
+                qed
+              qed
+            qed
+          next
+            case SendReceiveAsymetric_case_1
+            solve( GlobalSendChainKey( ~tidB, A, B, ~new_rk, h(~new_rk)
+                   ) @ #i )
+              case CompromiseSender
+              by contradiction
+            next
+              case SendSymetric
+              solve( !KU( h(~new_rk) ) @ #j.1 )
+                case CompromiseReceiving
+                by contradiction
+              next
+                case CompromiseSender
+                by contradiction
+              next
+                case c_h
+                solve( ((((#l = #j) ∨ (#j < #l))) ∧ (¬(#l = #j)))  ∥
+                       (∃ #k.
+                         (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                       (∃ #k.
+                         (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                  case case_1
+                  by solve( !KU( ~new_rk ) @ #vk )
+                next
+                  case case_2
+                  by contradiction
+                next
+                  case case_3
+                  by contradiction
+                qed
+              qed
+            qed
+          next
+            case SendReceiveAsymetric_case_2
+            solve( GlobalSendChainKey( ~tidB, A, B, ~new_rk, h(~new_rk)
+                   ) @ #i )
+              case CompromiseSender
+              by contradiction
+            next
+              case SendSymetric
+              solve( !KU( h(~new_rk) ) @ #j.1 )
+                case CompromiseReceiving
+                by contradiction
+              next
+                case CompromiseSender
+                by contradiction
+              next
+                case c_h
+                by solve( !KU( ~new_rk ) @ #vk )
+              qed
+            qed
+          qed
+        next
+          case case_2
+          solve( !KU( h(pck) ) @ #j.2 )
+            case CompromiseReceiving_case_1
+            solve( GlobalSendChainKey( ~tidB, A, B, ~other_rk, h(pck) ) @ #i )
+              case CompromiseSender
+              by contradiction
+            next
+              case SendSymetric
+              solve( (#j.1 = #l)  ∥ (#l < #j.1) )
+                case case_1
+                solve( StartChainRk( ~tidB, A, B, ~other_rk ) @ #l )
+                  case SendReceiveAsymetric_case_1
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_2
+                  by contradiction
+                qed
+              next
+                case case_2
+                solve( StartChainRk( ~tidB, A, B, ~other_rk ) @ #j.1 )
+                  case InitKeyExchange_case_1
+                  by contradiction
+                next
+                  case InitKeyExchange_case_2
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_ReceiveToSend
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_SendToReceive
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_1
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_2
+                  by contradiction
+                qed
+              qed
+            qed
+          next
+            case CompromiseReceiving_case_2
+            solve( GlobalSendChainKey( ~tidB, A, B, ~other_rk, h(pck) ) @ #i )
+              case CompromiseSender
+              by contradiction
+            next
+              case SendSymetric
+              solve( (#j.1 = #l)  ∥ (#l < #j.1) )
+                case case_1
+                solve( StartChainRk( ~tidB, A, B, ~other_rk ) @ #l )
+                  case SendReceiveAsymetric_case_1
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_2
+                  by contradiction
+                qed
+              next
+                case case_2
+                solve( StartChainRk( ~tidB, A, B, ~other_rk ) @ #j.1 )
+                  case InitKeyExchange_case_1
+                  by contradiction
+                next
+                  case InitKeyExchange_case_2
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_ReceiveToSend
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_SendToReceive
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_1
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_2
+                  by contradiction
+                qed
+              qed
+            qed
+          next
+            case CompromiseSender
+            solve( (#l = #j.2)  ∥ (#j.2 < #l) )
+              case case_1
+              by contradiction
+            next
+              case case_2
+              solve( (#l = #i)  ∥ (#i < #l) )
+                case case_1
+                by solve( GlobalSendChainKey( ~tidB, A, B, ~rk.1, h(pck) ) @ #i )
+              next
+                case case_2
+                by contradiction
+              qed
+            qed
+          next
+            case c_h
+            solve( (#l < #i)  ∥ (#l = #i) )
+              case case_1
+              solve( (#j.1 = #l)  ∥ (#l < #j.1) )
+                case case_1
+                solve( StartChainRk( ~tidB, A, B, rk.1 ) @ #l )
+                  case SendReceiveAsymetric_case_1
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_2
+                  solve( (∃ #k.
+                           (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                         (∃ #k.
+                           (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                    case case_1
+                    by contradiction
+                  next
+                    case case_2
+                    by contradiction
+                  qed
+                qed
+              next
+                case case_2
+                solve( (∃ #k.
+                         (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                       (∃ #k.
+                         (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                qed
+              qed
+            next
+              case case_2
+              by solve( GlobalSendChainKey( ~tidB, A, B, rk.1, h(pck) ) @ #i )
+            qed
+          qed
+        qed
+      qed
+    next
+      case SendReceiveAsymetric_case_2
+      solve( Heal( tid, A.1, ~rk ) @ #l )
+        case SendReceiveAsymetric_case_1
+        solve( (#l < #i)  ∥ (#l = #i) )
+          case case_1
+          solve( (sck = h(rk.1))  ∥
+                 (∃ pck #j.
+                   (sck = h(pck)) ∧
+                   (GlobalSendChainKey( ~tidA, A, B, rk.1, pck ) @ #j)
+                  ∧
+                   #j < #i) )
+            case case_1
+            solve( StartChainRk( ~tidA, A, B, rk.1 ) @ #j )
+              case InitKeyExchange_case_1
+              by contradiction
+            next
+              case InitKeyExchange_case_2
+              by contradiction
+            next
+              case SendReceiveAsymetric_ReceiveToSend
+              solve( !KU( h(~new_rk) ) @ #j.1 )
+                case CompromiseSender
+                by contradiction
+              next
+                case c_h
+                solve( (∃ #k.
+                         (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                       (∃ #k.
+                         (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                qed
+              qed
+            next
+              case SendReceiveAsymetric_SendToReceive
+              solve( !KU( h(~new_rk) ) @ #j.1 )
+                case CompromiseReceiving
+                by contradiction
+              next
+                case CompromiseSender
+                by contradiction
+              next
+                case c_h
+                solve( (∃ #k.
+                         (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                       (∃ #k.
+                         (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                qed
+              qed
+            next
+              case SendReceiveAsymetric_case_1
+              solve( !KU( h(~new_rk) ) @ #j.1 )
+                case CompromiseReceiving
+                by contradiction
+              next
+                case CompromiseSender
+                by contradiction
+              next
+                case c_h
+                by solve( !KU( ~new_rk ) @ #vk )
+              qed
+            next
+              case SendReceiveAsymetric_case_2
+              solve( (#j = #l)  ∥ (#l < #j) )
+                case case_1
+                by contradiction
+              next
+                case case_2
+                solve( !KU( h(~new_rk) ) @ #j.1 )
+                  case CompromiseReceiving
+                  by contradiction
+                next
+                  case CompromiseSender
+                  by contradiction
+                next
+                  case c_h
+                  solve( GlobalSendChainKey( ~tidA.1, A, B, ~new_rk, h(~new_rk)
+                         ) @ #i )
+                    case CompromiseSender
+                    by contradiction
+                  next
+                    case SendSymetric
+                    solve( (∃ #k.
+                             (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                           (∃ #k.
+                             (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                      case case_1
+                      by contradiction
+                    next
+                      case case_2
+                      by contradiction
+                    qed
+                  qed
+                qed
+              qed
+            qed
+          next
+            case case_2
+            solve( (#j = #l)  ∥ (#l < #j) )
+              case case_1
+              solve( StartChainRk( ~tidA, A, B, rk.1 ) @ #j )
+                case SendReceiveAsymetric_case_1
+                solve( !KU( h(pck) ) @ #j.2 )
+                  case CompromiseReceiving_case_1
+                  by contradiction
+                next
+                  case CompromiseReceiving_case_2
+                  by contradiction
+                next
+                  case CompromiseSender
+                  by contradiction
+                next
+                  case c_h
+                  solve( (∃ #k.
+                           (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#j < #k))  ∥
+                         (∃ #k.
+                           (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#j < #k)) )
+                    case case_1
+                    by contradiction
+                  next
+                    case case_2
+                    by contradiction
+                  qed
+                qed
+              next
+                case SendReceiveAsymetric_case_2
+                by contradiction
+              qed
+            next
+              case case_2
+              solve( !KU( h(pck) ) @ #j.2 )
+                case CompromiseReceiving_case_1
+                solve( StartChainRk( ~tidA, A, B, ~other_rk ) @ #j.1 )
+                  case InitKeyExchange_case_1
+                  by contradiction
+                next
+                  case InitKeyExchange_case_2
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_ReceiveToSend
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_SendToReceive
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_1
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_2
+                  by contradiction
+                qed
+              next
+                case CompromiseReceiving_case_2
+                solve( StartChainRk( ~tidA, A, B, ~other_rk ) @ #j.1 )
+                  case InitKeyExchange_case_1
+                  by contradiction
+                next
+                  case InitKeyExchange_case_2
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_ReceiveToSend
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_SendToReceive
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_1
+                  by contradiction
+                next
+                  case SendReceiveAsymetric_case_2
+                  by contradiction
+                qed
+              next
+                case CompromiseSender
+                by contradiction
+              next
+                case c_h
+                solve( (∃ #k.
+                         (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                       (∃ #k.
+                         (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                  case case_1
+                  by contradiction
+                next
+                  case case_2
+                  by contradiction
+                qed
+              qed
+            qed
+          qed
+        next
+          case case_2
+          by solve( GlobalSendChainKey( ~tidA, A, B, rk.1, sck ) @ #i )
+        qed
+      next
+        case SendReceiveAsymetric_case_2
+        by contradiction
+      qed
+    qed
+  next
+    case case_3
+    solve( (sck = h(rk))  ∥
+           (∃ pck #j.
+             (sck = h(pck)) ∧ (ReceiverChain( tid, A, B, rk, pck ) @ #j)
+            ∧
+             #j < #i) )
+      case case_1
+      solve( ReceiverChain( tid, A, B, rk, h(rk) ) @ #i )
+        case ReceiveSymetric
+        solve( (#l < #r)  ∥ (#l = #r) )
+          case case_1
+          solve( !KU( h(~rk) ) @ #j )
+            case CompromiseReceiving_case_1
+            solve( StartChainRk( ~tidB, A, B, ~rk ) @ #r )
+              case InitKeyExchange_case_1
+              by contradiction
+            next
+              case InitKeyExchange_case_2
+              by contradiction
+            qed
+          next
+            case CompromiseReceiving_case_2
+            solve( StartChainRk( ~tidB, A, B, ~rk ) @ #r )
+              case InitKeyExchange_case_1
+              by contradiction
+            next
+              case InitKeyExchange_case_2
+              by contradiction
+            qed
+          next
+            case CompromiseReceiving_case_3
+            solve( StartChainRk( ~tidB, A, B, ~rk ) @ #r )
+              case SendReceiveAsymetric_case_1
+              by contradiction
+            next
+              case SendReceiveAsymetric_case_2
+              by contradiction
+            qed
+          next
+            case CompromiseReceiving_case_4
+            solve( StartChainRk( ~tidB, A, B, ~rk ) @ #r )
+              case SendReceiveAsymetric_SendToReceive
+              by contradiction
+            qed
+          next
+            case CompromiseSender
+            solve( StartChainRk( ~tidB, A, B, ~rk ) @ #r )
+              case InitKeyExchange_case_1
+              by contradiction
+            next
+              case InitKeyExchange_case_2
+              by contradiction
+            next
+              case SendReceiveAsymetric_ReceiveToSend
+              by contradiction
+            next
+              case SendReceiveAsymetric_SendToReceive
+              by contradiction
+            next
+              case SendReceiveAsymetric_case_1
+              by contradiction
+            next
+              case SendReceiveAsymetric_case_2
+              by contradiction
+            qed
+          next
+            case c_h
+            solve( (∃ #k.
+                     (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                   (∃ #k.
+                     (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+              case case_1
+              by contradiction
+            next
+              case case_2
+              by contradiction
+            qed
+          qed
+        next
+          case case_2
+          solve( StartChainRk( ~tidB, A, B, ~rk ) @ #l )
+            case InitKeyExchange_case_1
+            by contradiction
+          next
+            case InitKeyExchange_case_2
+            solve( !KU( h(~rk) ) @ #j )
+              case CompromiseReceiving_case_1
+              by contradiction
+            next
+              case CompromiseReceiving_case_2
+              by contradiction
+            next
+              case CompromiseSender
+              by contradiction
+            next
+              case c_h
+              solve( (∃ #k.
+                       (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                     (∃ #k.
+                       (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                case case_1
+                by contradiction
+              next
+                case case_2
+                by contradiction
+              qed
+            qed
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction
+          next
+            case SendReceiveAsymetric_SendToReceive
+            solve( !KU( h(~rk) ) @ #j )
+              case CompromiseReceiving
+              by contradiction
+            next
+              case CompromiseSender
+              by contradiction
+            next
+              case c_h
+              solve( (∃ #k.
+                       (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                     (∃ #k.
+                       (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                case case_1
+                by contradiction
+              next
+                case case_2
+                by contradiction
+              qed
+            qed
+          next
+            case SendReceiveAsymetric_case_1
+            solve( !KU( h(~rk) ) @ #j )
+              case CompromiseReceiving
+              by contradiction
+            next
+              case CompromiseSender
+              by contradiction
+            next
+              case c_h
+              solve( (∃ #k.
+                       (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                     (∃ #k.
+                       (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+                case case_1
+                by contradiction
+              next
+                case case_2
+                by contradiction
+              qed
+            qed
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction
+          qed
+        qed
+      next
+        case ReceiveSymetricSkip
+        solve( (#l < #r)  ∥ (#l = #r) )
+          case case_1
+          solve( !KU( h(~rk) ) @ #j )
+            case CompromiseReceiving_case_1
+            solve( StartChainRk( ~tidB, A, B, ~rk ) @ #r )
+              case InitKeyExchange_case_1
+              by contradiction
+            next
+              case InitKeyExchange_case_2
+              by contradiction
+            qed
+          next
+            case CompromiseReceiving_case_2
+            solve( StartChainRk( ~tidB, A, B, ~rk ) @ #r )
+              case InitKeyExchange_case_1
+              by contradiction
+            next
+              case InitKeyExchange_case_2
+              by contradiction
+            qed
+          next
+            case CompromiseReceiving_case_3
+            solve( StartChainRk( ~tidB, A, B, ~rk ) @ #r )
+              case SendReceiveAsymetric_case_1
+              by contradiction
+            next
+              case SendReceiveAsymetric_case_2
+              by contradiction
+            qed
+          next
+            case CompromiseReceiving_case_4
+            solve( StartChainRk( ~tidB, A, B, ~rk ) @ #r )
+              case SendReceiveAsymetric_SendToReceive
+              by contradiction
+            qed
+          next
+            case CompromiseSender
+            solve( StartChainRk( ~tidB, A, B, ~rk ) @ #r )
+              case InitKeyExchange_case_1
+              by contradiction
+            next
+              case InitKeyExchange_case_2
+              by contradiction
+            next
+              case SendReceiveAsymetric_ReceiveToSend
+              by contradiction
+            next
+              case SendReceiveAsymetric_SendToReceive
+              by contradiction
+            next
+              case SendReceiveAsymetric_case_1
+              by contradiction
+            next
+              case SendReceiveAsymetric_case_2
+              by contradiction
+            qed
+          next
+            case c_h
+            solve( (∃ #k.
+                     (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                   (∃ #k.
+                     (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+              case case_1
+              by contradiction
+            next
+              case case_2
+              by contradiction
+            qed
+          qed
+        next
+          case case_2
+          solve( !KU( h(~rk) ) @ #j )
+            case CompromiseReceiving_case_1
+            solve( StartChainRk( ~tidB, A, B, ~rk ) @ #l )
+              case InitKeyExchange_case_1
+              by contradiction
+            next
+              case InitKeyExchange_case_2
+              by contradiction
+            qed
+          next
+            case CompromiseReceiving_case_2
+            solve( StartChainRk( ~tidB, A, B, ~rk ) @ #l )
+              case InitKeyExchange_case_1
+              by contradiction
+            next
+              case InitKeyExchange_case_2
+              by contradiction
+            qed
+          next
+            case CompromiseReceiving_case_3
+            solve( StartChainRk( ~tidB, A, B, ~rk ) @ #l )
+              case SendReceiveAsymetric_case_1
+              by contradiction
+            next
+              case SendReceiveAsymetric_case_2
+              by contradiction
+            qed
+          next
+            case CompromiseReceiving_case_4
+            solve( StartChainRk( ~tidB, A, B, ~rk ) @ #l )
+              case SendReceiveAsymetric_SendToReceive
+              by contradiction
+            qed
+          next
+            case CompromiseSender
+            solve( StartChainRk( ~tidB, A, B, ~rk ) @ #l )
+              case InitKeyExchange_case_1
+              by contradiction
+            next
+              case InitKeyExchange_case_2
+              by contradiction
+            next
+              case SendReceiveAsymetric_ReceiveToSend
+              by contradiction
+            next
+              case SendReceiveAsymetric_SendToReceive
+              by contradiction
+            next
+              case SendReceiveAsymetric_case_1
+              by contradiction
+            next
+              case SendReceiveAsymetric_case_2
+              by contradiction
+            qed
+          next
+            case c_h
+            solve( (∃ #k.
+                     (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                   (∃ #k.
+                     (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+              case case_1
+              by contradiction
+            next
+              case case_2
+              by contradiction
+            qed
+          qed
+        qed
+      qed
+    next
+      case case_2
+      solve( (#l < #r)  ∥ (#l = #r) )
+        case case_1
+        solve( !KU( h(pck) ) @ #j.1 )
+          case CompromiseReceiving_case_1
+          solve( ReceiverChain( tid, A, B, ~other_rk, pck ) @ #j.1 )
+            case ReceiveSymetric
+            by contradiction
+          next
+            case ReceiveSymetricSkip
+            solve( StartChainRk( ~tidB.1, A, B, ~other_rk ) @ #r )
+              case InitKeyExchange_case_1
+              by contradiction
+            next
+              case InitKeyExchange_case_2
+              by contradiction
+            next
+              case SendReceiveAsymetric_ReceiveToSend
+              by contradiction
+            next
+              case SendReceiveAsymetric_SendToReceive
+              by contradiction
+            next
+              case SendReceiveAsymetric_case_1
+              by contradiction
+            next
+              case SendReceiveAsymetric_case_2
+              by contradiction
+            qed
+          qed
+        next
+          case CompromiseReceiving_case_2
+          solve( StartChainRk( tid, A, B, ~other_rk ) @ #r )
+            case InitKeyExchange_case_1
+            by contradiction
+          next
+            case InitKeyExchange_case_2
+            by contradiction
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction
+          qed
+        next
+          case CompromiseSender
+          solve( StartChainRk( tid, A, B, ~rk ) @ #r )
+            case InitKeyExchange_case_1
+            by contradiction
+          next
+            case InitKeyExchange_case_2
+            by contradiction
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction
+          qed
+        next
+          case c_h
+          solve( (∃ #k.
+                   (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                 (∃ #k.
+                   (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+            case case_1
+            by contradiction
+          next
+            case case_2
+            by contradiction
+          qed
+        qed
+      next
+        case case_2
+        solve( !KU( h(pck) ) @ #j.1 )
+          case CompromiseReceiving_case_1
+          solve( StartChainRk( tid, A, B, ~other_rk ) @ #l )
+            case InitKeyExchange_case_1
+            by contradiction
+          next
+            case InitKeyExchange_case_2
+            by contradiction
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction
+          qed
+        next
+          case CompromiseReceiving_case_2
+          solve( StartChainRk( tid, A, B, ~other_rk ) @ #l )
+            case InitKeyExchange_case_1
+            by contradiction
+          next
+            case InitKeyExchange_case_2
+            by contradiction
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction
+          qed
+        next
+          case CompromiseSender
+          solve( StartChainRk( tid, A, B, ~rk ) @ #l )
+            case InitKeyExchange_case_1
+            by contradiction
+          next
+            case InitKeyExchange_case_2
+            by contradiction
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction
+          qed
+        next
+          case c_h
+          solve( (∃ #k.
+                   (CompromisePartie( A, B ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k))  ∥
+                 (∃ #k.
+                   (CompromisePartie( B, A ) @ #k) ∧ (¬(last(#k))) ∧ (#l < #k)) )
+            case case_1
+            by contradiction
+          next
+            case case_2
+            by contradiction
+          qed
+        qed
+      qed
+    qed
+  qed
+qed
+
+
+lemma PCS [use_induction, hide_lemma=ForwardSecrecySender,
+           hide_lemma=AsymmetricNeedsCompromiseBefore]:
+  all-traces
+  "∀ A B rk rk2 tid tid2 #i #j #l.
+    (((((StartChainRk( tid, A, B, rk ) @ #i) ∧ (!KU( rk ) @ #j)) ∧
+       (Heal( tid2, B, rk2 ) @ #l)) ∧
+      (Heal( tid, A, rk2 ) @ #l)) ∧
+     ((#l < #i) ∨ (#l = #i))) ⇒
+    ((∃ #k. (CompromisePartie( A, B ) @ #k) ∧ (#l < #k)) ∨
+     (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ (#l < #k)))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ A B rk rk2 tid tid2 #i #j #l.
+  (StartChainRk( tid, A, B, rk ) @ #i) ∧
+  (!KU( rk ) @ #j) ∧
+  (Heal( tid2, B, rk2 ) @ #l) ∧
+  (Heal( tid, A, rk2 ) @ #l)
+ ∧
+  (((#l < #i) ∨ (#l = #i))) ∧
+  (∀ #k. (CompromisePartie( A, B ) @ #k) ⇒ ¬(#l < #k)) ∧
+  (∀ #k. (CompromisePartie( B, A ) @ #k) ⇒ ¬(#l < #k))"
+*/
+induction
+  case empty_trace
+  by contradiction /* from formulas */
+next
+  case non_empty_trace
+  simplify
+  solve( ((¬(#l < #i)) ∧ (¬(#l = #i)))  ∥
+         (∃ #k. (CompromisePartie( A, B ) @ #k) ∧ #l < #k)  ∥
+         (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ #l < #k) )
+    case case_1
+    solve( (#l < #i)  ∥ (#i < #l) )
+      case case_1
+      by contradiction /* from formulas */
+    next
+      case case_2
+      by contradiction /* from formulas */
+    qed
+  next
+    case case_2
+    by contradiction /* from formulas */
+  next
+    case case_3
+    by contradiction /* from formulas */
+  qed
+qed
+
+
+lemma StartChainPreceededByAssociate [reuse, use_induction]:
+  all-traces
+  "∀ A B rk tid #i.
+    (StartChainRk( tid, A, B, rk ) @ #i) ⇒
+    (∃ #j. (InitKeyExchange( A, B ) @ #j) ∧ ((#j < #i) ∨ (#i = #j)))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ A B rk tid #i.
+  (StartChainRk( tid, A, B, rk ) @ #i)
+ ∧
+  ∀ #j. (InitKeyExchange( A, B ) @ #j) ⇒ (¬(#j < #i)) ∧ (¬(#i = #j))"
+*/
+induction
+  case empty_trace
+  by contradiction /* from formulas */
+next
+  case non_empty_trace
+  simplify
+  solve( StartChainRk( tid, A, B, rk ) @ #i )
+    case InitKeyExchange_case_1
+    by contradiction /* from formulas */
+  next
+    case InitKeyExchange_case_2
+    by contradiction /* from formulas */
+  next
+    case SendReceiveAsymetric_ReceiveToSend
+    solve( !ReceivingChainKey( ~tidB, ~rk, A, B, rck ) ▶₁ #i )
+      case InitKeyExchange_case_1
+      by contradiction /* from formulas */
+    next
+      case InitKeyExchange_case_2
+      by contradiction /* from formulas */
+    next
+      case ReceiveSymetric
+      solve( StartChainRk( ~tidB, A, B, ~rk ) @ #j )
+        case InitKeyExchange_case_1
+        by contradiction /* from formulas */
+      next
+        case InitKeyExchange_case_2
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_SendToReceive
+        solve( (#j.1 < #j)  ∥ (#j = #j.1) )
+          case case_1
+          by contradiction /* from formulas */
+        next
+          case case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_case_1
+        solve( (#j.1 < #j)  ∥ (#j = #j.1) )
+          case case_1
+          by contradiction /* from formulas */
+        next
+          case case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case ReceiveSymetricSkip
+      solve( (#j.1 < #j)  ∥ (#j = #j.1) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric
+      solve( (#j = #i)  ∥ (#i < #j) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric_SendToReceive
+      solve( (#j = #i)  ∥ (#i < #j) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    qed
+  next
+    case SendReceiveAsymetric_SendToReceive
+    solve( SendingChainKey( ~rk, ~tidA, A, B, sck ) ▶₀ #i )
+      case CompromiseSender
+      solve( (#j.1 = #i)  ∥ (#i < #j.1) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case InitKeyExchange_case_1
+      by contradiction /* from formulas */
+    next
+      case InitKeyExchange_case_2
+      by contradiction /* from formulas */
+    next
+      case SendReceiveAsymetric
+      solve( (#j = #i)  ∥ (#i < #j) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_1
+      by contradiction /* from formulas */
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_2
+      by contradiction /* from formulas */
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_3
+      solve( (#j = #i)  ∥ (#i < #j) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_4
+      solve( (#j = #i)  ∥ (#i < #j) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_5
+      solve( (#j.1 = #i)  ∥ (#i < #j.1) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_6
+      solve( (#j.1 = #i)  ∥ (#i < #j.1) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendSymetric
+      solve( (#j.1 = #i)  ∥ (#i < #j.1) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    qed
+  next
+    case SendReceiveAsymetric_case_1
+    solve( SendingChainKey( ~rk, ~tidA, A, B, ck ) ▶₀ #i )
+      case CompromiseSender
+      solve( (#j.1 < #j)  ∥ (#j = #j.1) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case InitKeyExchange_case_1
+      by contradiction /* from formulas */
+    next
+      case InitKeyExchange_case_2
+      by contradiction /* from formulas */
+    next
+      case SendReceiveAsymetric
+      solve( (#j = #i)  ∥ (#i < #j) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_1
+      by contradiction /* from formulas */
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_2
+      by contradiction /* from formulas */
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_3
+      solve( (#j = #i)  ∥ (#i < #j) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_4
+      solve( (#j = #i)  ∥ (#i < #j) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_5
+      solve( (#i < #j.1)  ∥ (#j.1 < #i) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_6
+      solve( (#i < #j.1)  ∥ (#j.1 < #i) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendSymetric
+      solve( (#j.1 = #i)  ∥ (#i < #j.1) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    qed
+  next
+    case SendReceiveAsymetric_case_2
+    solve( SendingChainKey( ~rk, ~tidA, B, A, ck ) ▶₀ #i )
+      case CompromiseSender
+      solve( StartChainRk( ~tidA, B, A, ~rk ) @ #j )
+        case InitKeyExchange_case_1
+        by contradiction /* from formulas */
+      next
+        case InitKeyExchange_case_2
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        solve( InitKeyExchange( B, A ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_SendToReceive
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_case_1
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_case_2
+        solve( InitKeyExchange( B, A ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case InitKeyExchange_case_1
+      by contradiction /* from formulas */
+    next
+      case InitKeyExchange_case_2
+      by contradiction /* from formulas */
+    next
+      case SendReceiveAsymetric
+      solve( (#j = #i)  ∥ (#i < #j) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_1
+      by contradiction /* from formulas */
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_2
+      by contradiction /* from formulas */
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_3
+      solve( (#j.1 < #vr.1)  ∥ (#vr.1 = #j.1) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_4
+      solve( (#j < #vr)  ∥ (#vr = #j) )
+        case case_1
+        solve( InitKeyExchange( B, A ) @ #j )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_5
+      solve( (#j.1 < #vr)  ∥ (#vr = #j.1) )
+        case case_1
+        solve( InitKeyExchange( B, A ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_6
+      solve( InitKeyExchange( B, A ) @ #j.1 )
+        case InitKeyExchange_case_1
+        by contradiction /* from formulas */
+      next
+        case InitKeyExchange_case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendSymetric
+      solve( InitKeyExchange( B, A ) @ #j.1 )
+        case InitKeyExchange_case_1
+        by contradiction /* from formulas */
+      next
+        case InitKeyExchange_case_2
+        by contradiction /* from formulas */
+      qed
+    qed
+  qed
+qed
+
+lemma SameTidKey [reuse, use_induction]:
+  all-traces
+  "∀ A B rk tid tid2 rk2 #i #j.
+    (((StartChainRk( tid, A, B, rk ) @ #i) ∧
+      (StartChainRk( tid2, A, B, rk2 ) @ #j)) ∧
+     (#i < #j)) ⇒
+    (tid = tid2)"
+/*
+guarded formula characterizing all counter-examples:
+"∃ A B rk tid tid2 rk2 #i #j.
+  (StartChainRk( tid, A, B, rk ) @ #i) ∧
+  (StartChainRk( tid2, A, B, rk2 ) @ #j)
+ ∧
+  (#i < #j) ∧ (¬(tid = tid2))"
+*/
+induction
+  case empty_trace
+  by contradiction /* from formulas */
+next
+  case non_empty_trace
+  simplify
+  solve( StartChainRk( tid2, A, B, rk2 ) @ #j )
+    case InitKeyExchange_case_1
+    by contradiction /* from formulas */
+  next
+    case InitKeyExchange_case_2
+    by contradiction /* from formulas */
+  next
+    case SendReceiveAsymetric_ReceiveToSend
+    solve( !ReceivingChainKey( ~tidB, ~rk, A, B, rck ) ▶₁ #j )
+      case InitKeyExchange_case_1
+      solve( StartChainRk( tid, $id, $id.1, rk.1 ) @ #i )
+        case InitKeyExchange_case_1
+        by contradiction /* from formulas */
+      next
+        case InitKeyExchange_case_2
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_SendToReceive
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_case_1
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case InitKeyExchange_case_2
+      solve( StartChainRk( tid, $id, $id.1, rk.1 ) @ #i )
+        case InitKeyExchange_case_1
+        by contradiction /* from formulas */
+      next
+        case InitKeyExchange_case_2
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_SendToReceive
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_case_1
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case ReceiveSymetric
+      solve( (#j.1 = #i)  ∥ (#i < #j.1)  ∥ (~tidB = tid) )
+        case case_1
+        solve( StartChainRk( ~tidB, A, B, ~rk ) @ #i )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          solve( StartChainRk( tid, A, B, rk.1 ) @ #i )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_SendToReceive
+          solve( StartChainRk( tid, A, B, rk.2 ) @ #i )
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_case_1
+          solve( StartChainRk( tid, A, B, rk.2 ) @ #i )
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case case_2
+        by contradiction /* from formulas */
+      next
+        case case_3
+        by contradiction /* from formulas */
+      qed
+    next
+      case ReceiveSymetricSkip
+      solve( (#j.1 = #i)  ∥ (#i < #j.1)  ∥ (~tidB = tid) )
+        case case_1
+        solve( StartChainRk( tid, A, B, rk.1 ) @ #i )
+          case InitKeyExchange_case_1
+          solve( StartChainRk( ~tidB.1, A, B, ~rk.1 ) @ #i )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case InitKeyExchange_case_2
+          solve( StartChainRk( ~tidB.1, A, B, ~rk.1 ) @ #i )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          solve( StartChainRk( ~tidB.1, A, B, ~rk.1 ) @ #i )
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_SendToReceive
+          solve( StartChainRk( ~tidB, A, B, ~rk.1 ) @ #i )
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_case_1
+          solve( StartChainRk( ~tidB.1, A, B, ~rk.1 ) @ #i )
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_case_2
+          solve( StartChainRk( ~tidB.1, A, B, ~rk.1 ) @ #i )
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        qed
+      next
+        case case_2
+        by contradiction /* from formulas */
+      next
+        case case_3
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric
+      solve( (#vr = #i)  ∥ (#i < #vr)  ∥ (~tidB = tid) )
+        case case_1
+        solve( StartChainRk( tid, A, B, rk.2 ) @ #i )
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case case_2
+        by contradiction /* from formulas */
+      next
+        case case_3
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric_SendToReceive
+      solve( (#vr = #i)  ∥ (#i < #vr)  ∥ (~tidB = tid) )
+        case case_1
+        solve( StartChainRk( tid, A, B, rk.2 ) @ #i )
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        qed
+      next
+        case case_2
+        by contradiction /* from formulas */
+      next
+        case case_3
+        by contradiction /* from formulas */
+      qed
+    qed
+  next
+    case SendReceiveAsymetric_SendToReceive
+    solve( SendingChainKey( ~rk, ~tidA, A, B, sck ) ▶₀ #j )
+      case CompromiseSender
+      solve( (#j.1 = #i)  ∥ (#i < #j.1)  ∥ (~tidA = tid) )
+        case case_1
+        solve( StartChainRk( tid, A, B, rk.1 ) @ #i )
+          case InitKeyExchange_case_1
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #i )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case InitKeyExchange_case_2
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #i )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          solve( StartChainRk( ~tidA, A, B, ~rk.1 ) @ #i )
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_SendToReceive
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #i )
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_case_1
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #i )
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_case_2
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #i )
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        qed
+      next
+        case case_2
+        by contradiction /* from formulas */
+      next
+        case case_3
+        by contradiction /* from formulas */
+      qed
+    next
+      case InitKeyExchange_case_1
+      solve( StartChainRk( tid, $id, $id.1, rk.1 ) @ #i )
+        case InitKeyExchange_case_1
+        by contradiction /* from formulas */
+      next
+        case InitKeyExchange_case_2
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_SendToReceive
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_case_1
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case InitKeyExchange_case_2
+      solve( StartChainRk( tid, $id, $id.1, rk.1 ) @ #i )
+        case InitKeyExchange_case_1
+        by contradiction /* from formulas */
+      next
+        case InitKeyExchange_case_2
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_SendToReceive
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_case_1
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric
+      solve( (#vr = #i)  ∥ (#i < #vr)  ∥ (~tidA = tid) )
+        case case_1
+        solve( StartChainRk( tid, A, B, rk.2 ) @ #i )
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case case_2
+        by contradiction /* from formulas */
+      next
+        case case_3
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_1
+      solve( InitKeyExchange( $id.1, $id ) @ #j.1 )
+        case InitKeyExchange
+        solve( InitKeyExchange( $id, $id.1 ) @ #j.1 )
+          case InitKeyExchange
+          solve( StartChainRk( tid, $id, $id.1, rk.2 ) @ #i )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* cyclic */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* cyclic */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* cyclic */
+          qed
+        qed
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_2
+      solve( InitKeyExchange( $id.1, $id ) @ #j.1 )
+        case InitKeyExchange
+        solve( InitKeyExchange( $id, $id.1 ) @ #j.1 )
+          case InitKeyExchange
+          solve( StartChainRk( tid, $id, $id.1, rk.2 ) @ #i )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* cyclic */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* cyclic */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* cyclic */
+          qed
+        qed
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_3
+      solve( InitKeyExchange( A, B ) @ #j.1 )
+        case InitKeyExchange_case_1
+        solve( StartChainRk( tid, A, B, rk.4 ) @ #i )
+          case InitKeyExchange
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case InitKeyExchange_case_2
+        solve( StartChainRk( tid, A, B, rk.4 ) @ #i )
+          case InitKeyExchange
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_4
+      solve( InitKeyExchange( A, B ) @ #j.1 )
+        case InitKeyExchange_case_1
+        solve( StartChainRk( tid, A, B, rk.4 ) @ #i )
+          case InitKeyExchange
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case InitKeyExchange_case_2
+        solve( StartChainRk( tid, A, B, rk.4 ) @ #i )
+          case InitKeyExchange
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_5
+      solve( InitKeyExchange( A, B ) @ #j.2 )
+        case InitKeyExchange_case_1
+        solve( StartChainRk( tid, A, B, rk.3 ) @ #i )
+          case InitKeyExchange
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case InitKeyExchange_case_2
+        solve( StartChainRk( tid, A, B, rk.3 ) @ #i )
+          case InitKeyExchange
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_6
+      solve( InitKeyExchange( A, B ) @ #j.2 )
+        case InitKeyExchange_case_1
+        solve( StartChainRk( tid, A, B, rk.3 ) @ #i )
+          case InitKeyExchange
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case InitKeyExchange_case_2
+        solve( StartChainRk( tid, A, B, rk.3 ) @ #i )
+          case InitKeyExchange
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case SendSymetric
+      solve( InitKeyExchange( A, B ) @ #j.2 )
+        case InitKeyExchange_case_1
+        solve( StartChainRk( tid, A, B, rk.2 ) @ #i )
+          case InitKeyExchange_case_1
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.1 )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_SendToReceive
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_case_1
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_case_2
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        qed
+      next
+        case InitKeyExchange_case_2
+        solve( StartChainRk( tid, A, B, rk.2 ) @ #i )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.1 )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          solve( StartChainRk( ~tidA, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_SendToReceive
+          solve( StartChainRk( ~tidA, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_case_1
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_case_2
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        qed
+      qed
+    qed
+  next
+    case SendReceiveAsymetric_case_1
+    solve( SendingChainKey( ~rk, ~tidA, A, B, ck ) ▶₀ #j )
+      case CompromiseSender
+      solve( InitKeyExchange( A, B ) @ #j.2 )
+        case InitKeyExchange_case_1
+        solve( StartChainRk( tid, A, B, rk.2 ) @ #i )
+          case InitKeyExchange_case_1
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.1 )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_SendToReceive
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_case_1
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_case_2
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        qed
+      next
+        case InitKeyExchange_case_2
+        solve( StartChainRk( ~tidA, A, B, ~rk ) @ #j.2 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          solve( StartChainRk( tid, A, B, rk.3 ) @ #i )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          solve( StartChainRk( tid, A, B, rk.3 ) @ #i )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        qed
+      qed
+    next
+      case InitKeyExchange_case_1
+      solve( StartChainRk( tid, $id, $id.1, rk.1 ) @ #i )
+        case InitKeyExchange_case_1
+        by contradiction /* from formulas */
+      next
+        case InitKeyExchange_case_2
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_SendToReceive
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_case_1
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case InitKeyExchange_case_2
+      solve( StartChainRk( tid, $id, $id.1, rk.1 ) @ #i )
+        case InitKeyExchange_case_1
+        by contradiction /* from formulas */
+      next
+        case InitKeyExchange_case_2
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_SendToReceive
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_case_1
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case SendReceiveAsymetric
+      solve( StartChainRk( tid, A, B, rk.2 ) @ #i )
+        case InitKeyExchange_case_1
+        by contradiction /* from formulas */
+      next
+        case InitKeyExchange_case_2
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        solve( InitKeyExchange( A, B ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_SendToReceive
+        solve( InitKeyExchange( A, B ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_case_1
+        solve( InitKeyExchange( A, B ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_case_2
+        solve( InitKeyExchange( A, B ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_1
+      solve( StartChainRk( tid, $id, $id.1, rk.2 ) @ #i )
+        case InitKeyExchange
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_SendToReceive
+        by contradiction /* cyclic */
+      next
+        case SendReceiveAsymetric_case_1
+        by contradiction /* cyclic */
+      next
+        case SendReceiveAsymetric_case_2
+        by contradiction /* cyclic */
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_2
+      solve( StartChainRk( tid, $id, $id.1, rk.2 ) @ #i )
+        case InitKeyExchange
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_SendToReceive
+        by contradiction /* cyclic */
+      next
+        case SendReceiveAsymetric_case_1
+        by contradiction /* cyclic */
+      next
+        case SendReceiveAsymetric_case_2
+        by contradiction /* cyclic */
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_3
+      solve( StartChainRk( tid, A, B, rk.3 ) @ #i )
+        case InitKeyExchange_case_1
+        by contradiction /* from formulas */
+      next
+        case InitKeyExchange_case_2
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        solve( InitKeyExchange( A, B ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_SendToReceive
+        solve( InitKeyExchange( A, B ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_case_1
+        solve( InitKeyExchange( A, B ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_case_2
+        solve( InitKeyExchange( A, B ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_4
+      solve( StartChainRk( tid, A, B, rk.3 ) @ #i )
+        case InitKeyExchange_case_1
+        by contradiction /* from formulas */
+      next
+        case InitKeyExchange_case_2
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        solve( InitKeyExchange( A, B ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_SendToReceive
+        solve( InitKeyExchange( A, B ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_case_1
+        solve( InitKeyExchange( A, B ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_case_2
+        solve( InitKeyExchange( A, B ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_5
+      solve( StartChainRk( tid, A, B, rk.2 ) @ #i )
+        case InitKeyExchange_case_1
+        by contradiction /* from formulas */
+      next
+        case InitKeyExchange_case_2
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        solve( InitKeyExchange( A, B ) @ #j.2 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_SendToReceive
+        solve( InitKeyExchange( A, B ) @ #j.2 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_case_1
+        solve( InitKeyExchange( A, B ) @ #j.2 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_case_2
+        solve( InitKeyExchange( A, B ) @ #j.2 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case SendReceiveAsymetric_ReceiveToSend_case_6
+      solve( StartChainRk( tid, A, B, rk.2 ) @ #i )
+        case InitKeyExchange_case_1
+        by contradiction /* from formulas */
+      next
+        case InitKeyExchange_case_2
+        by contradiction /* from formulas */
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        solve( InitKeyExchange( A, B ) @ #j.2 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_SendToReceive
+        solve( InitKeyExchange( A, B ) @ #j.2 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_case_1
+        solve( InitKeyExchange( A, B ) @ #j.2 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_case_2
+        solve( InitKeyExchange( A, B ) @ #j.2 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case SendSymetric
+      solve( StartChainRk( tid, A, B, rk.1 ) @ #i )
+        case InitKeyExchange_case_1
+        solve( InitKeyExchange( A, B ) @ #i )
+          case InitKeyExchange
+          solve( InitKeyExchange( B, A ) @ #i )
+            case InitKeyExchange
+            solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.1 )
+              case InitKeyExchange_case_1
+              by contradiction /* from formulas */
+            next
+              case InitKeyExchange_case_2
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_ReceiveToSend
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_SendToReceive
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_case_1
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_case_2
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      next
+        case InitKeyExchange_case_2
+        solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case SendReceiveAsymetric_ReceiveToSend
+        solve( StartChainRk( ~tidA, A, B, ~rk.1 ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          solve( InitKeyExchange( A, B ) @ #j.2 )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          solve( InitKeyExchange( A, B ) @ #j.2 )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          qed
+        qed
+      next
+        case SendReceiveAsymetric_SendToReceive
+        solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.1 )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          solve( InitKeyExchange( A, B ) @ #j.2 )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          solve( InitKeyExchange( A, B ) @ #j.2 )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          qed
+        qed
+      next
+        case SendReceiveAsymetric_case_1
+        solve( InitKeyExchange( A, B ) @ #j.2 )
+          case InitKeyExchange_case_1
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case InitKeyExchange_case_2
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        qed
+      next
+        case SendReceiveAsymetric_case_2
+        solve( InitKeyExchange( A, B ) @ #j.2 )
+          case InitKeyExchange_case_1
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case InitKeyExchange_case_2
+          solve( StartChainRk( ~tidA.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        qed
+      qed
+    qed
+  next
+    case SendReceiveAsymetric_case_2
+    solve( !ReceivingChainKey( ~tidB, ~rk, A, B, ck ) ▶₁ #j )
+      case InitKeyExchange_case_1
+      solve( InitKeyExchange( $id.1, $id ) @ #j.1 )
+        case InitKeyExchange
+        solve( InitKeyExchange( $id, $id.1 ) @ #j.1 )
+          case InitKeyExchange
+          solve( StartChainRk( tid, $id.1, $id, rk.1 ) @ #i )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        qed
+      qed
+    next
+      case InitKeyExchange_case_2
+      solve( InitKeyExchange( $id, $id.1 ) @ #j.1 )
+        case InitKeyExchange
+        solve( InitKeyExchange( $id.1, $id ) @ #j.1 )
+          case InitKeyExchange
+          solve( StartChainRk( tid, $id.1, $id, rk.1 ) @ #i )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        qed
+      qed
+    next
+      case ReceiveSymetric
+      solve( (#j.1 = #i)  ∥ (#i < #j.1)  ∥ (~tidB = tid) )
+        case case_1
+        solve( InitKeyExchange( A, B ) @ #j.1 )
+          case InitKeyExchange_case_1
+          solve( InitKeyExchange( B, A ) @ #j.1 )
+            case InitKeyExchange
+            solve( StartChainRk( tid, A, B, rk.2 ) @ #i )
+              case InitKeyExchange_case_1
+              solve( StartChainRk( ~tidB.1, A, B, ~rk.1 ) @ #i )
+                case InitKeyExchange_case_1
+                by contradiction /* from formulas */
+              next
+                case InitKeyExchange_case_2
+                by contradiction /* from formulas */
+              qed
+            next
+              case InitKeyExchange_case_2
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_ReceiveToSend
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_SendToReceive
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_case_1
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_case_2
+              by contradiction /* from formulas */
+            qed
+          qed
+        next
+          case InitKeyExchange_case_2
+          solve( StartChainRk( tid, A, B, rk.2 ) @ #i )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            solve( StartChainRk( ~tidB.1, A, B, ~rk.1 ) @ #i )
+              case InitKeyExchange_case_1
+              by contradiction /* from formulas */
+            next
+              case InitKeyExchange_case_2
+              by contradiction /* from formulas */
+            qed
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        qed
+      next
+        case case_2
+        by contradiction /* from formulas */
+      next
+        case case_3
+        by contradiction /* from formulas */
+      qed
+    next
+      case ReceiveSymetricSkip
+      solve( InitKeyExchange( A, B ) @ #j.2 )
+        case InitKeyExchange_case_1
+        solve( InitKeyExchange( B, A ) @ #j.1 )
+          case InitKeyExchange
+          solve( StartChainRk( tid, A, B, rk.2 ) @ #i )
+            case InitKeyExchange_case_1
+            solve( StartChainRk( ~tidB.1, A, B, ~rk.1 ) @ #j.1 )
+              case InitKeyExchange_case_1
+              by contradiction /* from formulas */
+            next
+              case InitKeyExchange_case_2
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_ReceiveToSend
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_SendToReceive
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_case_1
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_case_2
+              by contradiction /* from formulas */
+            qed
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            solve( StartChainRk( ~tidB, A, B, ~rk.1 ) @ #j.2 )
+              case InitKeyExchange
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_ReceiveToSend
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_SendToReceive
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_case_1
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_case_2
+              by contradiction /* from formulas */
+            qed
+          next
+            case SendReceiveAsymetric_SendToReceive
+            solve( StartChainRk( ~tidB, A, B, ~rk.1 ) @ #j.2 )
+              case InitKeyExchange
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_ReceiveToSend
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_SendToReceive
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_case_1
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_case_2
+              by contradiction /* from formulas */
+            qed
+          next
+            case SendReceiveAsymetric_case_1
+            solve( StartChainRk( ~tidB.1, A, B, ~rk.1 ) @ #j.2 )
+              case InitKeyExchange
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_ReceiveToSend
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_SendToReceive
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_case_1
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_case_2
+              by contradiction /* from formulas */
+            qed
+          next
+            case SendReceiveAsymetric_case_2
+            solve( StartChainRk( ~tidB.1, A, B, ~rk.1 ) @ #j.2 )
+              case InitKeyExchange
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_ReceiveToSend
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_SendToReceive
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_case_1
+              by contradiction /* from formulas */
+            next
+              case SendReceiveAsymetric_case_2
+              by contradiction /* from formulas */
+            qed
+          qed
+        qed
+      next
+        case InitKeyExchange_case_2
+        solve( StartChainRk( tid, A, B, rk.2 ) @ #i )
+          case InitKeyExchange_case_1
+          by contradiction /* from formulas */
+        next
+          case InitKeyExchange_case_2
+          solve( StartChainRk( ~tidB.1, A, B, ~rk.1 ) @ #j.1 )
+            case InitKeyExchange_case_1
+            by contradiction /* from formulas */
+          next
+            case InitKeyExchange_case_2
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          solve( StartChainRk( ~tidB.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_SendToReceive
+          solve( StartChainRk( ~tidB.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_case_1
+          solve( StartChainRk( ~tidB.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case SendReceiveAsymetric_case_2
+          solve( StartChainRk( ~tidB.1, A, B, ~rk.1 ) @ #j.2 )
+            case InitKeyExchange
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_ReceiveToSend
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_SendToReceive
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_1
+            by contradiction /* from formulas */
+          next
+            case SendReceiveAsymetric_case_2
+            by contradiction /* from formulas */
+          qed
+        qed
+      qed
+    next
+      case SendReceiveAsymetric
+      solve( InitKeyExchange( A, B ) @ #j.1 )
+        case InitKeyExchange_case_1
+        solve( StartChainRk( tid, A, B, rk.3 ) @ #i )
+          case InitKeyExchange
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case InitKeyExchange_case_2
+        solve( StartChainRk( tid, A, B, rk.3 ) @ #i )
+          case InitKeyExchange
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case SendReceiveAsymetric_SendToReceive
+      solve( InitKeyExchange( A, B ) @ #j.1 )
+        case InitKeyExchange_case_1
+        solve( StartChainRk( tid, A, B, rk.3 ) @ #i )
+          case InitKeyExchange
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case InitKeyExchange_case_2
+        solve( StartChainRk( tid, A, B, rk.3 ) @ #i )
+          case InitKeyExchange
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_ReceiveToSend
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_SendToReceive
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_1
+          by contradiction /* from formulas */
+        next
+          case SendReceiveAsymetric_case_2
+          by contradiction /* from formulas */
+        qed
+      qed
+    qed
+  qed
+qed
+
+lemma PCS_Conversation [hide_lemma=ForwardSecrecySender,
+                        hide_lemma=AsymmetricNeedsCompromiseBefore]:
+  all-traces
+  "∀ A B rk rk2 #i #j #l.
+    (((((ConversationStartChainRk( A, B, rk ) @ #i) ∧
+        (!KU( rk ) @ #j)) ∧
+       (ConversationHeal( A, B, rk2 ) @ #l)) ∧
+      (ConversationHeal( A, B, rk2 ) @ #l)) ∧
+     ((#l < #i) ∨ (#l = #i))) ⇒
+    ((∃ #k. (CompromisePartie( A, B ) @ #k) ∧ (#l < #k)) ∨
+     (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ (#l < #k)))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ A B rk rk2 #i #j #l.
+  (ConversationStartChainRk( A, B, rk ) @ #i) ∧
+  (!KU( rk ) @ #j) ∧
+  (ConversationHeal( A, B, rk2 ) @ #l) ∧
+  (ConversationHeal( A, B, rk2 ) @ #l)
+ ∧
+  (((#l < #i) ∨ (#l = #i))) ∧
+  (∀ #k. (CompromisePartie( A, B ) @ #k) ⇒ ¬(#l < #k)) ∧
+  (∀ #k. (CompromisePartie( B, A ) @ #k) ⇒ ¬(#l < #k))"
+*/
+simplify
+solve( ConversationStartChainRk( A, B, rk ) @ #i )
+  case InitKeyExchange_case_1
+  solve( ConversationHeal( A, B, rk2 ) @ #l )
+    case SendReceiveAsymetric_case_1
+    by contradiction /* cyclic */
+  next
+    case SendReceiveAsymetric_case_2
+    by contradiction /* cyclic */
+  qed
+next
+  case InitKeyExchange_case_2
+  solve( ConversationHeal( A, B, rk2 ) @ #l )
+    case SendReceiveAsymetric_case_1
+    by contradiction /* cyclic */
+  next
+    case SendReceiveAsymetric_case_2
+    by contradiction /* cyclic */
+  qed
+next
+  case SendReceiveAsymetric_ReceiveToSend
+  solve( ConversationHeal( A, B, rk2 ) @ #l )
+    case SendReceiveAsymetric_case_1
+    solve( InitKeyExchange( A, B ) @ #j )
+      case InitKeyExchange_case_1
+      solve( InitKeyExchange( B, A ) @ #j )
+        case InitKeyExchange
+        solve( (∃ #k. (CompromisePartie( A, B ) @ #k) ∧ #l < #k)  ∥
+               (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ #l < #k) )
+          case case_1
+          by contradiction /* from formulas */
+        next
+          case case_2
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case InitKeyExchange_case_2
+      solve( (∃ #k. (CompromisePartie( A, B ) @ #k) ∧ #l < #k)  ∥
+             (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ #l < #k) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    qed
+  next
+    case SendReceiveAsymetric_case_2
+    solve( (∃ #k. (CompromisePartie( A, B ) @ #k) ∧ #l < #k)  ∥
+           (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ #l < #k) )
+      case case_1
+      by contradiction /* from formulas */
+    next
+      case case_2
+      by contradiction /* from formulas */
+    qed
+  qed
+next
+  case SendReceiveAsymetric_SendToReceive
+  solve( ConversationHeal( A, B, rk2 ) @ #l )
+    case SendReceiveAsymetric_case_1
+    solve( (∃ #k. (CompromisePartie( A, B ) @ #k) ∧ #l < #k)  ∥
+           (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ #l < #k) )
+      case case_1
+      by contradiction /* from formulas */
+    next
+      case case_2
+      by contradiction /* from formulas */
+    qed
+  next
+    case SendReceiveAsymetric_case_2
+    solve( (∃ #k. (CompromisePartie( A, B ) @ #k) ∧ #l < #k)  ∥
+           (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ #l < #k) )
+      case case_1
+      by contradiction /* from formulas */
+    next
+      case case_2
+      by contradiction /* from formulas */
+    qed
+  qed
+next
+  case SendReceiveAsymetric_case_1
+  solve( ConversationHeal( A, B, rk2 ) @ #l )
+    case SendReceiveAsymetric_case_1
+    solve( InitKeyExchange( B, A ) @ #j.1 )
+      case InitKeyExchange_case_1
+      solve( InitKeyExchange( A, B ) @ #j )
+        case InitKeyExchange
+        solve( ((¬(#l < #i)) ∧ (¬(#l = #i)))  ∥
+               (∃ #k. (CompromisePartie( A, B ) @ #k) ∧ #l < #k)  ∥
+               (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ #l < #k) )
+          case case_1
+          solve( (#l < #i)  ∥ (#l = #i) )
+            case case_1
+            by contradiction /* from formulas */
+          next
+            case case_2
+            by contradiction /* from formulas */
+          qed
+        next
+          case case_2
+          by contradiction /* from formulas */
+        next
+          case case_3
+          by contradiction /* from formulas */
+        qed
+      qed
+    next
+      case InitKeyExchange_case_2
+      solve( (#l < #i)  ∥ (#l = #i) )
+        case case_1
+        solve( (∃ #k. (CompromisePartie( A, B ) @ #k) ∧ #i < #k)  ∥
+               (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ #i < #k) )
+          case case_1
+          by contradiction /* from formulas */
+        next
+          case case_2
+          by contradiction /* from formulas */
+        qed
+      next
+        case case_2
+        solve( (∃ #k. (CompromisePartie( A, B ) @ #k) ∧ #i < #k)  ∥
+               (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ #i < #k) )
+          case case_1
+          by contradiction /* from formulas */
+        next
+          case case_2
+          by contradiction /* from formulas */
+        qed
+      qed
+    qed
+  next
+    case SendReceiveAsymetric_case_2
+    solve( (#l < #i)  ∥ (#l = #i) )
+      case case_1
+      solve( (∃ #k. (CompromisePartie( A, B ) @ #k) ∧ #i < #k)  ∥
+             (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ #i < #k) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case case_2
+      by contradiction /* from formulas */
+    qed
+  qed
+next
+  case SendReceiveAsymetric_case_2
+  solve( ConversationHeal( A, B, rk2 ) @ #l )
+    case SendReceiveAsymetric_case_1
+    solve( (#l < #i)  ∥ (#l = #i) )
+      case case_1
+      solve( (∃ #k. (CompromisePartie( A, B ) @ #k) ∧ #i < #k)  ∥
+             (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ #i < #k) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case case_2
+      by contradiction /* from formulas */
+    qed
+  next
+    case SendReceiveAsymetric_case_2
+    solve( (#l < #i)  ∥ (#l = #i) )
+      case case_1
+      solve( (∃ #k. (CompromisePartie( A, B ) @ #k) ∧ #i < #k)  ∥
+             (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ #i < #k) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    next
+      case case_2
+      solve( (∃ #k. (CompromisePartie( A, B ) @ #k) ∧ #i < #k)  ∥
+             (∃ #k. (CompromisePartie( B, A ) @ #k) ∧ #i < #k) )
+        case case_1
+        by contradiction /* from formulas */
+      next
+        case case_2
+        by contradiction /* from formulas */
+      qed
+    qed
+  qed
+qed
+
+
+
+end
