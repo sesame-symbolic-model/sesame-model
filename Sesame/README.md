@@ -26,7 +26,7 @@ The rest of the file contains all the proved lemmas: sanity traces, structural h
 
 To *run* the file, write in the shell the following command:
 
-`tamarin-prover --prove DoubleRatchet.spthy`
+`tamarin-prover --prove Sesame/DoubleRatchet.spthy`
 
 
 ### Sesame PCS Attack
@@ -41,7 +41,7 @@ The following trace shows the attacker being able to perform an asymmetric steps
 
 To *run* the file, write in the shell the following command:
 
-`tamarin-prover Sesame_PCSAttack.spthy`
+`tamarin-prover Sesame/Sesame_PCSAttack.spthy`
 
 
 ### Sesame with Sequential Session
@@ -53,7 +53,7 @@ The rest of the file remains the same with now the main lemmas,  **Forward Secre
 
 To *run* the file, write in the shell the following command:
 
-`tamarin-prover --prove Sesame_Solution_RestoredPCS.spthy`
+`tamarin-prover --prove Sesame/Sesame_Solution_RestoredPCS.spthy`
 
 
 ### Sesame with Clone Detection
@@ -66,7 +66,7 @@ The rest of the file remains the same with now the main lemma **Clone Detection 
 
 To *run* the file, write in the shell the following command:
 
-`tamarin-prover --prove Sesame_CloneDetection.spthy`
+`tamarin-prover --prove Sesame/Sesame_CloneDetection.spthy`
 
 ------------------------------
 
